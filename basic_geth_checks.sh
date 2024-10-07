@@ -6,19 +6,24 @@
 
 # Function to display usage information
 usage() {
-  echo "Usage: $0 <port>"
+  log "Usage: $0 <full_url_or_port>"
   exit 1
 }
 
-# Check if the port argument is provided
+# Check if the argument is provided
 if [ -z "$1" ]; then
-  echo "Error: Port number not provided."
+  log "Error: URL or Port number not provided."
   usage
 fi
 
-# Assigning the port to a variable
-PORT=$1
-URL="127.0.0.1:$PORT"
+# Assign the argument to a variable
+if [[ "$1" =~ ^[0-9]+$ ]]; then
+  # If only a port is provided, default to 127.0.0.1:$port
+  URL="127.0.0.1:$1"
+else
+  # Otherwise, expect a full URL
+  URL="$1"
+fi
 
 # Function for verbose logging
 log() {
