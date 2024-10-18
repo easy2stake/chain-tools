@@ -61,8 +61,23 @@ else
   log "Current Block Hash: $block_hash"
 fi
 
+# Finalized block number check
+log "\n\nChecking finalized block number..."
+block_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params": ["finalized", true],"id":1}' $URL)
 
-# Current block number check
+block_number_hex=$( echo "$block_data" | jq -r '.result.number')
+
+if [ -z "$block_number_hex" ]; then
+  echo "[ERROR] Failed to retrieve block number"
+else
+  block_number_int=$(echo "$block_number_hex" | xargs printf "%d\n")
+  block_hash=$(echo $block_data  | jq -r '.result.hash')
+  echo "Finalized Block Number (Hex): $block_number_hex"
+  echo "Finalized Block Number (Int): $block_number_int"
+  log "Current Block Hash: $block_hash"
+fi
+
+# Earliest block number check
 log "\nChecking earliest block number..."
 block_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params": ["earliest", true],"id":1}' $URL)
 
@@ -73,8 +88,7 @@ if [ -z "$block_number_hex" ]; then
   echo "[ERROR] Failed to retrieve block number"
 else
   block_number_int=$(echo "$block_number_hex" | xargs printf "%d\n")
-  echo "Current Block Number (Hex): $block_number_hex"
-  echo "Current Block Number (Int): $block_number_int"
+  echo "Earliest Block Number (Hex): $block_number_hex"
+  echo "Earliest Block Number (Int): $block_number_int"
   echo "Block Hash: $block_hash"
 fi
-
