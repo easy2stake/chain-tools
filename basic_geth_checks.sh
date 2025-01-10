@@ -1,8 +1,13 @@
 #!/bin/bash
 
-# Script: basic_geth_checks.sh
+# Script: basic_geth_checks_with_timestamps.sh
 # This script performs basic checks on a Geth node by calling various JSON-RPC methods.
-# It checks peer count, syncing status, and current block number.
+# It checks peer count, syncing status, current block number, finalized block, and earliest block along with their timestamps.
+
+# Function for verbose logging
+log() {
+  echo -e "$1"
+}
 
 # Function to display usage information
 usage() {
@@ -25,13 +30,37 @@ else
   URL="$1"
 fi
 
-# Function for verbose logging
-log() {
-  echo -e "$1"
-}
-
 # Log the start of the process
 log "Starting Geth checks on URL: $URL"
+
+# Function to fetch and parse block data
+get_block_data() {
+  block_number=$1
+  curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params": ["'$block_number'", true],"id":1}' $URL
+}
+
+# Function to extract field from block data
+extract_field() {
+  data=$1
+  field=$2
+  echo "$data" | jq -r ".result.$field"
+}
+
+# Function to safely convert hex to decimal
+safe_hex_to_dec() {
+  hex_value=$1
+  if [[ $hex_value =~ ^0x ]]; then
+    printf "%d" "$((16#${hex_value:2}))"
+  else
+    echo "0"
+  fi
+}
+
+# Function to convert Unix timestamp to UTC format
+timestamp_to_utc() {
+  unix_timestamp=$1
+  date -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ"
+}
 
 # Peer count check
 log "\nChecking peer count..."
@@ -45,50 +74,24 @@ curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","m
   echo "[ERROR] Failed to retrieve sync status"
 }
 
-# Current block number check
-log "\n\nChecking current block number..."
-block_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params": ["latest", true],"id":1}' $URL)
+# Block checks
+for block_type in "latest" "finalized" "earliest"; do
+  log "\n\nChecking $block_type block..."
+  block_data=$(get_block_data "$block_type")
 
-block_number_hex=$( echo "$block_data" | jq -r '.result.number')
+  block_number_hex=$(extract_field "$block_data" "number")
+  if [ -z "$block_number_hex" ]; then
+    echo "[ERROR] Failed to retrieve block number for $block_type block"
+  else
+    block_number_int=$(safe_hex_to_dec "$block_number_hex")
+    block_hash=$(extract_field "$block_data" "hash")
+    timestamp_hex=$(extract_field "$block_data" "timestamp")
+    timestamp=$(safe_hex_to_dec "$timestamp_hex")
+    timestamp_utc=$(timestamp_to_utc "$timestamp")
 
-if [ -z "$block_number_hex" ]; then
-  echo "[ERROR] Failed to retrieve block number"
-else
-  block_number_int=$(echo "$block_number_hex" | xargs printf "%d\n")
-  block_hash=$(echo $block_data  | jq -r '.result.hash')
-  echo "Current Block Number (Hex): $block_number_hex"
-  echo "Current Block Number (Int): $block_number_int"
-  log "Current Block Hash: $block_hash"
-fi
-
-# Finalized block number check
-log "\n\nChecking finalized block number..."
-block_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params": ["finalized", true],"id":1}' $URL)
-
-block_number_hex=$( echo "$block_data" | jq -r '.result.number')
-
-if [ -z "$block_number_hex" ]; then
-  echo "[ERROR] Failed to retrieve block number"
-else
-  block_number_int=$(echo "$block_number_hex" | xargs printf "%d\n")
-  block_hash=$(echo $block_data  | jq -r '.result.hash')
-  echo "Finalized Block Number (Hex): $block_number_hex"
-  echo "Finalized Block Number (Int): $block_number_int"
-  log "Current Block Hash: $block_hash"
-fi
-
-# Earliest block number check
-log "\nChecking earliest block number..."
-block_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params": ["earliest", true],"id":1}' $URL)
-
-block_number_hex=$(echo "$block_data" | jq -r '.result.number')
-block_hash=$(echo "$block_data" | jq -r '.result.hash')
-
-if [ -z "$block_number_hex" ]; then
-  echo "[ERROR] Failed to retrieve block number"
-else
-  block_number_int=$(echo "$block_number_hex" | xargs printf "%d\n")
-  echo "Earliest Block Number (Hex): $block_number_hex"
-  echo "Earliest Block Number (Int): $block_number_int"
-  echo "Block Hash: $block_hash"
-fi
+    echo "${block_type^} Block Number (Hex): $block_number_hex"
+    echo "${block_type^} Block Number (Int): $block_number_int"
+    echo "${block_type^} Block Hash: $block_hash"
+    echo "${block_type^} Block Timestamp: $timestamp_utc"
+  fi
+done
