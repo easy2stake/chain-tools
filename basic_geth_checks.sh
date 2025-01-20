@@ -198,9 +198,37 @@ Fetching balance for account: $account at block height: $block_height..."
     echo "Raw Response: $balance_data"
   else
     balance_wei=$(safe_hex_to_dec "$balance_hex")
+    balance_eth=$(echo "scale=18; $balance_wei / 1000000000000000000" | bc -l)
+
+    if (( $(echo "$balance_eth < 1" | bc -l) )); then
+      printf "Balance (in ETH): %.18f
+" "$balance_eth"
+    else
+      printf "Balance (in ETH): %.4f
+" "$balance_eth"
+    fi
+    echo "Balance (in Wei): $balance_wei"
+  fi
+} # Default to "latest" if no height is provided
+
+  if [[ "$block_height" =~ ^[0-9]+$ ]]; then
+    block_height=$(safe_dec_to_hex "$block_height")
+  fi
+
+  log "
+Fetching balance for account: $account at block height: $block_height..."
+  balance_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBalance","params": ["'$account'", "'$block_height'"],"id":1}' $URL)
+
+  balance_hex=$(echo "$balance_data" | jq -r ".result")
+  if [ -z "$balance_hex" ] || [ "$balance_hex" == "null" ]; then
+    echo "[ERROR] Failed to retrieve balance for account: $account"
+    echo "Raw Response: $balance_data"
+  else
+    balance_wei=$(safe_hex_to_dec "$balance_hex")
     echo "Balance (in Wei): $balance_wei"
   fi
 }
+
 safe_dec_to_hex() {
   dec_value=$1
   printf "0x%x" "$dec_value"
