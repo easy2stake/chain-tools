@@ -180,9 +180,16 @@ get_transaction_by_hash() {
 }
 
 # Function to get the balance of an account at a specific block height
+# Function to get the balance of an account at a specific block height
 get_balance() {
   account=$1
   block_height=${2:-"latest"} # Default to "latest" if no height is provided
+
+  # Validate the Ethereum account address
+  if [[ -z "$account" || ! "$account" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    echo "[ERROR] Invalid or missing account address. Ensure it is a valid Ethereum address (0x followed by 40 hex characters)."
+    return 1
+  fi
 
   if [[ "$block_height" =~ ^[0-9]+$ ]]; then
     block_height=$(safe_dec_to_hex "$block_height")
@@ -201,30 +208,10 @@ Fetching balance for account: $account at block height: $block_height..."
     balance_eth=$(echo "scale=18; $balance_wei / 1000000000000000000" | bc -l)
 
     if (( $(echo "$balance_eth < 1" | bc -l) )); then
-      printf "Balance (in ETH): %.18f
-" "$balance_eth"
+      printf "Balance (in ETH): %.18f\n" "$balance_eth"
     else
-      printf "Balance (in ETH): %.4f
-" "$balance_eth"
+      printf "Balance (in ETH): %.4f\n" "$balance_eth"
     fi
-    echo "Balance (in Wei): $balance_wei"
-  fi
-} # Default to "latest" if no height is provided
-
-  if [[ "$block_height" =~ ^[0-9]+$ ]]; then
-    block_height=$(safe_dec_to_hex "$block_height")
-  fi
-
-  log "
-Fetching balance for account: $account at block height: $block_height..."
-  balance_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBalance","params": ["'$account'", "'$block_height'"],"id":1}' $URL)
-
-  balance_hex=$(echo "$balance_data" | jq -r ".result")
-  if [ -z "$balance_hex" ] || [ "$balance_hex" == "null" ]; then
-    echo "[ERROR] Failed to retrieve balance for account: $account"
-    echo "Raw Response: $balance_data"
-  else
-    balance_wei=$(safe_hex_to_dec "$balance_hex")
     echo "Balance (in Wei): $balance_wei"
   fi
 }
