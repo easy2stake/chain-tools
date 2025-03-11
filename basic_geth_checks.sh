@@ -13,7 +13,7 @@ log() {
 usage() {
   cat << EOF
 
-Usage: $0 <full_url_or_port> <command> [block_number]
+Usage: $0 <full_url_or_port> <command> [command_options]
 
 Commands:
   general_check                  Perform all basic Geth checks (peer count, sync status, blocks).
@@ -27,10 +27,15 @@ Examples:
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
-  $0 127.0.0.1:8545 <command <command_params>>
+  $0 127.0.0.1:8545 <command> <command_params>
 EOF
   exit 1
 }
+
+# If the first argument is --help or -h, display usage information.
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  usage
+fi
 
 # Check if the first argument (URL or port) is provided
 if [ -z "$1" ]; then
@@ -180,7 +185,6 @@ get_transaction_by_hash() {
 }
 
 # Function to get the balance of an account at a specific block height
-# Function to get the balance of an account at a specific block height
 get_balance() {
   account=$1
   block_height=${2:-"latest"} # Default to "latest" if no height is provided
@@ -195,8 +199,7 @@ get_balance() {
     block_height=$(safe_dec_to_hex "$block_height")
   fi
 
-  log "
-Fetching balance for account: $account at block height: $block_height..."
+  log "\nFetching balance for account: $account at block height: $block_height..."
   balance_data=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_getBalance","params": ["'$account'", "'$block_height'"],"id":1}' $URL)
 
   balance_hex=$(echo "$balance_data" | jq -r ".result")
@@ -216,17 +219,10 @@ Fetching balance for account: $account at block height: $block_height..."
   fi
 }
 
-safe_dec_to_hex() {
-  dec_value=$1
-  printf "0x%x" "$dec_value"
-}
-
-
-
 # Main logic
 if [ -z "$2" ]; then
-  log "Error: Command not provided."
-  usage
+  # No command provided: default to general_check
+  perform_checks
 elif [ "$2" == "general_check" ]; then
   perform_checks
 elif [ "$2" == "block_summary" ]; then
