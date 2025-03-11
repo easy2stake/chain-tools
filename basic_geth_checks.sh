@@ -2,7 +2,8 @@
 
 # Script: basic_geth_checks_with_timestamps.sh
 # This script performs basic checks on a Geth node by calling various JSON-RPC methods.
-# It checks peer count, syncing status, current block number, finalized block, and earliest block along with their timestamps.
+# It checks peer count, sync status, current block number, finalized block, and earliest block along with their timestamps.
+# The general_check now also prints the chain ID before executing other checks.
 
 # Function for verbose logging
 log() {
@@ -16,7 +17,7 @@ usage() {
 Usage: $0 <full_url_or_port> <command> [command_options]
 
 Commands:
-  general_check                  Perform all basic Geth checks (peer count, sync status, blocks).
+  general_check                  Perform all basic Geth checks (chain ID, peer count, sync status, blocks).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -92,6 +93,17 @@ timestamp_to_utc() {
 
 # Function to perform all checks
 perform_checks() {
+  # Print Chain ID first
+  log "\nFetching chain ID..."
+  chain_id=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"eth_chainId","params": [],"id":1}' $URL | jq -r ".result")
+  if [ -z "$chain_id" ] || [ "$chain_id" == "null" ]; then
+    echo "[ERROR] Failed to retrieve chain ID"
+  else
+    chain_id_int=$(safe_hex_to_dec "$chain_id")
+    echo "Chain ID (Hex): $chain_id"
+    echo "Chain ID (Int): $chain_id_int"
+  fi
+
   # Peer count check
   log "\nChecking peer count..."
   curl -s -X POST -H "Content-Type: application/json" -m 2 -d '{"jsonrpc":"2.0","method":"net_peerCount","params": [],"id":1}' $URL || {
