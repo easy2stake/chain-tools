@@ -22,12 +22,13 @@ Commands:
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
   tx <tx_hash>                   Fetch details of a specific transaction by its hash.
-
+  prysm_peers                  Extract consensus layer PRYSM peers.
 Examples:
   $0 8545 general_check
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
+  $0 127.0.0.1:8545 prysm_peers
   $0 127.0.0.1:8545 <command> <command_params>
 EOF
   exit 1
@@ -231,6 +232,18 @@ get_balance() {
   fi
 }
 
+# New function to extract consensus layer PRYSM peers
+get_prysm_peers() {
+  log "\nFetching PRYSM peers from consensus layer..."
+  peers=$(curl -s "$URL/eth/v1/node/peers" | jq -r '.data[].enr')
+  if [ -z "$peers" ]; then
+    echo "[ERROR] No peers found or error retrieving peers."
+  else
+    echo "PRYSM Peers:"
+    echo "$peers"
+  fi
+}
+
 # Main logic
 if [ -z "$2" ]; then
   # No command provided: default to general_check
@@ -261,6 +274,8 @@ elif [ "$2" == "get_balance" ]; then
     usage
   fi
   get_balance "$3" "$4"
+elif [ "$2" == "prysm_peers" ]; then
+  get_prysm_peers
 else
   log "Error: Invalid command."
   usage
