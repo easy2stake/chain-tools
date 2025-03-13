@@ -116,8 +116,8 @@ perform_checks() {
     echo "[ERROR] Failed to retrieve sync status"
   }
 
-  # Block checks
-  for block_type in "latest" "finalized" "earliest"; do
+  # Block checks: latest, safe, finalized, earliest
+  for block_type in "latest" "safe" "finalized" "earliest"; do
     log "\n\nChecking $block_type block..."
     block_data=$(get_block_data "$block_type")
 
