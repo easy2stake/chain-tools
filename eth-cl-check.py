@@ -58,7 +58,7 @@ def get_json(endpoint):
         print(f"{script_name}: Error fetching {full_url}: connection timed out")
         return None
     except Exception as e:
-        print(f"E{script_name}: rror fetching {full_url}: {e}")
+        print(f"{script_name}: Error fetching {full_url}: {e}")
         return None
 
 def check_sync_status():
@@ -68,7 +68,7 @@ def check_sync_status():
         sys.exit(1)
     log_debug(f"check_sync_status: {data}")
     if data.get("data", {}).get("is_syncing") is True:
-        print("{script_name}: Node is syncing or sync status unknown")
+        print("f{script_name}: Node is syncing or sync status unknown")
         return False, "syncing or unknown"
     return True, "synced"
 
