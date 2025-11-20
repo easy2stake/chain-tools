@@ -23,6 +23,13 @@ class EVMWatcher:
         self.stuck_check_interval = self.global_settings.get("stuck_check_interval", 30)
         self.min_restart_interval = self.global_settings.get("min_restart_interval", 600)
 
+    def log(self, message: str):
+        """
+        Prints a message with a human-readable timestamp.
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] {message}")
+
     def _load_config(self, path: str) -> Dict[str, Any]:
         try:
             with open(path, 'r') as f:
@@ -55,17 +62,17 @@ class EVMWatcher:
                 data = response.json()
                 
                 if "error" in data:
-                    print(f"RPC Error from {url}: {data['error']}")
+                    self.log(f"RPC Error from {url}: {data['error']}")
                     return None
                 
                 return data.get("result")
 
             except requests.exceptions.RequestException as e:
-                print(f"Attempt {attempt}/{self.max_retries} failed for {url}: {e}")
+                self.log(f"Attempt {attempt}/{self.max_retries} failed for {url}: {e}")
                 if attempt < self.max_retries:
                     time.sleep(self.retry_backoff)
                 else:
-                    print(f"All {self.max_retries} attempts failed for {url}.")
+                    self.log(f"All {self.max_retries} attempts failed for {url}.")
                     return None
 
     def get_chain_id(self, url: str) -> Optional[int]:
@@ -145,11 +152,11 @@ class EVMWatcher:
                 if date_res.returncode == 0:
                     return int(date_res.stdout.strip())
                 else:
-                    print(f"Failed to parse systemd date: {raw_time}")
+                    self.log(f"Failed to parse systemd date: {raw_time}")
                     return 0
                     
         except Exception as e:
-            print(f"Error fetching last restart time for {unit_name} ({installation_type}): {e}")
+            self.log(f"Error fetching last restart time for {unit_name} ({installation_type}): {e}")
             return 0
         
         return 0
@@ -167,14 +174,14 @@ class EVMWatcher:
         chain_config = self.get_chain_config(chain_id)
         
         if not chain_config:
-            print(f"No configuration found for Chain ID {chain_id}. Skipping restart.")
+            self.log(f"No configuration found for Chain ID {chain_id}. Skipping restart.")
             return
 
         install_type = chain_config.get("installation_type")
         unit_name = chain_config.get("unit_name")
 
         if not install_type or not unit_name:
-            print(f"Missing installation_type or unit_name for Chain ID {chain_id}. Skipping.")
+            self.log(f"Missing installation_type or unit_name for Chain ID {chain_id}. Skipping.")
             return
 
         if install_type == "docker":
@@ -182,19 +189,19 @@ class EVMWatcher:
         elif install_type == "systemd":
             command = f"systemctl restart {unit_name}"
         else:
-            print(f"Unknown installation type: {install_type} for Chain ID {chain_id}")
+            self.log(f"Unknown installation type: {install_type} for Chain ID {chain_id}")
             return
 
         if self.dry_run:
-            print(f"[DRY RUN] Would execute restart command for Chain ID {chain_id}: {command}")
+            self.log(f"[DRY RUN] Would execute restart command for Chain ID {chain_id}: {command}")
             return
 
-        print(f"Executing restart command for Chain ID {chain_id}: {command}")
+        self.log(f"Executing restart command for Chain ID {chain_id}: {command}")
         try:
             subprocess.run(command, shell=True, check=True)
-            print(f"Restart command executed successfully for Chain ID {chain_id}.")
+            self.log(f"Restart command executed successfully for Chain ID {chain_id}.")
         except subprocess.CalledProcessError as e:
-            print(f"Failed to execute restart command for Chain ID {chain_id}: {e}")
+            self.log(f"Failed to execute restart command for Chain ID {chain_id}: {e}")
 
     def check_endpoint(self, url: str):
         """
@@ -203,58 +210,58 @@ class EVMWatcher:
         2. Stuck (block number not increasing after interval)
         3. Restart cooldown passed (checked against live process status)
         """
-        print(f"\nChecking endpoint: {url}")
+        self.log(f"Checking endpoint: {url}")
         
         # 1. Get Chain ID
         chain_id = self.get_chain_id(url)
         if chain_id is None:
-            print(f"Failed to fetch Chain ID from {url}. Skipping.")
+            self.log(f"Failed to fetch Chain ID from {url}. Skipping.")
             return
 
         # Lookup name from config
         chain_config = self.get_chain_config(chain_id)
         chain_name = chain_config.get("name", "Unknown")
         
-        print(f"Chain ID: {chain_id} ({chain_name})")
+        self.log(f"Chain ID: {chain_id} ({chain_name})")
 
         # --- CONDITION 1: Sync Status & Lag ---
         sync_status = self.get_sync_status(url)
         
         if sync_status is not False: 
-            print(f"Chain {chain_id} is currently syncing. Skipping checks.")
+            self.log(f"Chain {chain_id} is currently syncing. Skipping checks.")
             return
 
         # Get Last Block
         block = self.get_last_block(url)
         if not block:
-            print(f"Failed to fetch latest block from {url}. Skipping.")
+            self.log(f"Failed to fetch latest block from {url}. Skipping.")
             return
 
         block_timestamp = self.get_block_timestamp(block)
         if block_timestamp is None:
-            print(f"Block data missing timestamp from {url}.")
+            self.log(f"Block data missing timestamp from {url}.")
             return
 
         current_time = int(time.time())
         lag = current_time - block_timestamp
         
-        print(f"Block Timestamp: {block_timestamp} (Lag: {lag}s)")
+        self.log(f"Block Timestamp: {block_timestamp} (Lag: {lag}s)")
 
         chain_config = self.get_chain_config(chain_id)
         threshold = chain_config.get("lag_threshold", self.default_lag_threshold)
 
         if lag <= threshold:
-            print(f"[OK] Chain {chain_id} is healthy.")
+            self.log(f"[OK] Chain {chain_id} is healthy.")
             return
             
-        print(f"[WARN] Condition 1 Met: Chain {chain_id} is lagging by {lag}s (Threshold: {threshold}s) and not syncing.")
+        self.log(f"[WARN] Condition 1 Met: Chain {chain_id} is lagging by {lag}s (Threshold: {threshold}s) and not syncing.")
 
         # --- CONDITION 2: Stuck Check ---
-        print(f"Checking Condition 2: Waiting {self.stuck_check_interval}s to confirm block is stuck...")
+        self.log(f"Checking Condition 2: Waiting {self.stuck_check_interval}s to confirm block is stuck...")
         
         initial_block_number_hex = block.get("number")
         if not initial_block_number_hex:
-             print("Could not get block number. Aborting.")
+             self.log("Could not get block number. Aborting.")
              return
              
         time.sleep(self.stuck_check_interval)
@@ -262,28 +269,28 @@ class EVMWatcher:
         # Fetch block again
         new_block = self.get_last_block(url)
         if not new_block:
-             print("Failed to fetch second block check. Aborting.")
+             self.log("Failed to fetch second block check. Aborting.")
              return
              
         new_block_number_hex = new_block.get("number")
         
         if initial_block_number_hex != new_block_number_hex:
-            print(f"[INFO] Block moved from {int(initial_block_number_hex, 16)} to {int(new_block_number_hex, 16)}. Chain is active. No restart needed.")
+            self.log(f"[INFO] Block moved from {int(initial_block_number_hex, 16)} to {int(new_block_number_hex, 16)}. Chain is active. No restart needed.")
             return
             
-        print(f"[WARN] Condition 2 Met: Block number stuck at {int(initial_block_number_hex, 16)} for {self.stuck_check_interval}s.")
+        self.log(f"[WARN] Condition 2 Met: Block number stuck at {int(initial_block_number_hex, 16)} for {self.stuck_check_interval}s.")
 
         # --- CONDITION 3: Restart Cooldown (Live Check) ---
         install_type = chain_config.get("installation_type")
         unit_name = chain_config.get("unit_name")
         
         if not install_type or not unit_name:
-            print(f"Missing configuration (installation_type/unit_name) for Chain {chain_id}. Cannot check process time.")
+            self.log(f"Missing configuration (installation_type/unit_name) for Chain {chain_id}. Cannot check process time.")
             return
 
         last_restart = self.get_last_restart_time(install_type, unit_name)
         if last_restart == 0:
-             print(f"[WARN] Could not determine last restart time for {unit_name}. Assuming safe to restart (careful!).")
+             self.log(f"[WARN] Could not determine last restart time for {unit_name}. Assuming safe to restart (careful!).")
              # Option: return here if you want to be conservative.
              # Proceeding for now.
         
@@ -292,13 +299,13 @@ class EVMWatcher:
         min_restart_interval = chain_config.get("min_restart_interval", self.min_restart_interval)
         
         if time_since_restart < min_restart_interval:
-            print(f"[INFO] Restart cooldown active. Last process start was {time_since_restart}s ago (Min interval: {min_restart_interval}s). Skipping.")
+            self.log(f"[INFO] Restart cooldown active. Last process start was {time_since_restart}s ago (Min interval: {min_restart_interval}s). Skipping.")
             return
             
-        print(f"[WARN] Condition 3 Met: Last process start was {time_since_restart}s ago.")
+        self.log(f"[WARN] Condition 3 Met: Last process start was {time_since_restart}s ago.")
         
         # All conditions met
-        print(f"[ALERT] All conditions met for Chain {chain_id}. Initiating restart...")
+        self.log(f"[ALERT] All conditions met for Chain {chain_id}. Initiating restart...")
         self.trigger_restart(chain_id)
 
     def run(self):
@@ -307,14 +314,14 @@ class EVMWatcher:
         """
         urls = self.config.get("urls", [])
         if not urls:
-            print("No URLs configured to watch.")
+            self.log("No URLs configured to watch.")
             return
 
         for url in urls:
             try:
                 self.check_endpoint(url)
             except Exception as e:
-                print(f"Unexpected error checking {url}: {e}")
+                self.log(f"Unexpected error checking {url}: {e}")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="EVM Chain Watcher: Monitors EVM endpoints and restarts stuck/lagging chains.")
