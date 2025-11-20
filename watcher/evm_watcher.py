@@ -324,8 +324,12 @@ class EVMWatcher:
                 self.log(f"Unexpected error checking {url}: {e}")
 
 def parse_arguments():
+    # Get the directory where the script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    default_config = os.path.join(script_dir, "watcher_config.json")
+
     parser = argparse.ArgumentParser(description="EVM Chain Watcher: Monitors EVM endpoints and restarts stuck/lagging chains.")
-    parser.add_argument("config", nargs="?", default="watcher_config.json", help="Path to the configuration file (default: watcher_config.json)")
+    parser.add_argument("config", nargs="?", default=default_config, help=f"Path to the configuration file (default: {default_config})")
     parser.add_argument("--dry-run", action="store_true", help="Perform checks without executing restart commands")
     return parser.parse_args()
 
