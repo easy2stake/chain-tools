@@ -1,0 +1,32 @@
+{
+  "urls": [
+    "http://127.0.0.1:9656"
+  ],
+  "global_settings": {
+    "request_timeout": 2,
+    "max_retries": 3,
+    "retry_backoff": 1,
+    "default_lag_threshold": 60,
+    "stuck_check_interval": 30,
+    "min_restart_interval": 600
+  },
+  "chains": {
+    "1": {
+      "name": "Ethereum Mainnet",
+      "restart_command": "echo 'Restarting Ethereum Mainnet service...'"
+    },
+    "137": {
+      "name": "Polygon Mainnet",
+      "restart_command": "docker restart polygon-full-erigon",
+      "lag_threshold": 120
+    },
+    "example": {
+      "name": "Example Chain",
+      "restart_command": "echo 'Restarting example chain...'",
+      "lag_threshold": 60,
+      "stuck_check_interval": 45,
+      "min_restart_interval": 1200
+    }
+  }
+}
+
