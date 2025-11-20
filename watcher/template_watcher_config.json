@@ -13,16 +13,19 @@
   "chains": {
     "1": {
       "name": "Ethereum Mainnet",
-      "restart_command": "echo 'Restarting Ethereum Mainnet service...'"
+      "installation_type": "systemd",
+      "unit_name": "geth"
     },
     "137": {
       "name": "Polygon Mainnet",
-      "restart_command": "docker restart polygon-full-erigon",
+      "installation_type": "docker",
+      "unit_name": "polygon-full-erigon",
       "lag_threshold": 120
     },
     "example": {
       "name": "Example Chain",
-      "restart_command": "echo 'Restarting example chain...'",
+      "installation_type": "docker",
+      "unit_name": "example-container",
       "lag_threshold": 60,
       "stuck_check_interval": 45,
       "min_restart_interval": 1200
