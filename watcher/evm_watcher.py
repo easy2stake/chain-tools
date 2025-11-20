@@ -6,12 +6,14 @@ import json
 import sys
 import subprocess
 import os
+import argparse
 from datetime import datetime
 from typing import Optional, Dict, Any, Union
 
 class EVMWatcher:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, dry_run: bool = False):
         self.config = self._load_config(config_path)
+        self.dry_run = dry_run
         
         self.global_settings = self.config.get("global_settings", {})
         self.timeout = self.global_settings.get("request_timeout", 2)
@@ -183,6 +185,10 @@ class EVMWatcher:
             print(f"Unknown installation type: {install_type} for Chain ID {chain_id}")
             return
 
+        if self.dry_run:
+            print(f"[DRY RUN] Would execute restart command for Chain ID {chain_id}: {command}")
+            return
+
         print(f"Executing restart command for Chain ID {chain_id}: {command}")
         try:
             subprocess.run(command, shell=True, check=True)
@@ -310,11 +316,13 @@ class EVMWatcher:
             except Exception as e:
                 print(f"Unexpected error checking {url}: {e}")
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="EVM Chain Watcher: Monitors EVM endpoints and restarts stuck/lagging chains.")
+    parser.add_argument("config", nargs="?", default="watcher_config.json", help="Path to the configuration file (default: watcher_config.json)")
+    parser.add_argument("--dry-run", action="store_true", help="Perform checks without executing restart commands")
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        config_file = "watcher_config.json"
-    else:
-        config_file = sys.argv[1]
-        
-    watcher = EVMWatcher(config_file)
+    args = parse_arguments()
+    watcher = EVMWatcher(args.config, dry_run=args.dry_run)
     watcher.run()
