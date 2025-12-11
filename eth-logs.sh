@@ -1,6 +1,6 @@
 #!/bin/bash
 
-URL="http://127.0.0.1:18545"
+URL="http://127.0.0.1:18585"
 BLOCK=$1
 TX_HASH=$2
 
