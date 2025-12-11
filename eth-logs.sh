@@ -20,7 +20,7 @@ curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
     }
   ],
   \"id\": 1
-}" $URL | jq .
+}" $URL | jq . | tee -a getLogs.tmp
 echo ""
 
 echo "--- 2. eth_getBlockReceipts (Block: $BLOCK) ---"
@@ -29,7 +29,7 @@ curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
   \"method\": \"eth_getBlockReceipts\",
   \"params\": [\"$BLOCK\"],
   \"id\": 1
-}" $URL | jq .
+}" $URL | jq . | tee -a getBlockReceipts.tmp
 echo ""
 
 if [ -n "$TX_HASH" ]; then
@@ -39,6 +39,6 @@ if [ -n "$TX_HASH" ]; then
     \"method\": \"eth_getTransactionReceipt\",
     \"params\": [\"$TX_HASH\"],
     \"id\": 1
-  }" $URL | jq .
+  }" $URL | jq . | tee -a getTransactionReceipt.tmp
   echo ""
 fi
