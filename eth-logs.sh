@@ -1,50 +1,130 @@
 #!/bin/bash
 
 URL="http://127.0.0.1:18585"
+VERBOSE=false
+
+# Parse for verbose flag
+for arg in "$@"; do
+  if [ "$arg" == "-v" ] || [ "$arg" == "--verbose" ]; then
+    VERBOSE=true
+  fi
+done
+
+# Remove verbose flag from arguments
+ARGS=()
+for arg in "$@"; do
+  if [ "$arg" != "-v" ] && [ "$arg" != "--verbose" ]; then
+    ARGS+=("$arg")
+  fi
+done
 
 # Function to query a single block
 query_block() {
   local BLOCK=$1
   local TX_HASH=$2
   
-  echo "--- 1. eth_getLogs (Block: $BLOCK) ---"
-  curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
-    \"jsonrpc\": \"2.0\",
-    \"method\": \"eth_getLogs\",
-    \"params\": [
-      {
-        \"fromBlock\": \"$BLOCK\",
-        \"toBlock\": \"$BLOCK\"
-      }
-    ],
-    \"id\": 1
-  }" $URL | jq . | tee -a getLogs.tmp
-  echo ""
-
-  echo "--- 2. eth_getBlockReceipts (Block: $BLOCK) ---"
-  curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
-    \"jsonrpc\": \"2.0\",
-    \"method\": \"eth_getBlockReceipts\",
-    \"params\": [\"$BLOCK\"],
-    \"id\": 1
-  }" $URL | jq . | tee -a getBlockReceipts.tmp
-  echo ""
-
-  if [ -n "$TX_HASH" ]; then
-    echo "--- 3. eth_getTransactionReceipt (Tx: $TX_HASH) ---"
-    curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
+  # 1. eth_getLogs
+  if [ "$VERBOSE" == "true" ]; then
+    echo "--- 1. eth_getLogs (Block: $BLOCK) ---"
+    RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
       \"jsonrpc\": \"2.0\",
-      \"method\": \"eth_getTransactionReceipt\",
-      \"params\": [\"$TX_HASH\"],
+      \"method\": \"eth_getLogs\",
+      \"params\": [
+        {
+          \"fromBlock\": \"$BLOCK\",
+          \"toBlock\": \"$BLOCK\"
+        }
+      ],
       \"id\": 1
-    }" $URL | jq . | tee -a getTransactionReceipt.tmp
+    }" $URL)
+    echo "$RESPONSE" | jq . | tee -a getLogs.tmp
     echo ""
+  else
+    RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
+      \"jsonrpc\": \"2.0\",
+      \"method\": \"eth_getLogs\",
+      \"params\": [
+        {
+          \"fromBlock\": \"$BLOCK\",
+          \"toBlock\": \"$BLOCK\"
+        }
+      ],
+      \"id\": 1
+    }" $URL)
+    echo "$RESPONSE" >> getLogs.tmp
+    
+    # Check if request was successful
+    if echo "$RESPONSE" | jq -e '.result' > /dev/null 2>&1; then
+      LOG_COUNT=$(echo "$RESPONSE" | jq -r '.result | length')
+      echo "✓ eth_getLogs: $LOG_COUNT logs found"
+    else
+      echo "✗ eth_getLogs: Failed or error"
+    fi
+  fi
+
+  # 2. eth_getBlockReceipts
+  if [ "$VERBOSE" == "true" ]; then
+    echo "--- 2. eth_getBlockReceipts (Block: $BLOCK) ---"
+    RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
+      \"jsonrpc\": \"2.0\",
+      \"method\": \"eth_getBlockReceipts\",
+      \"params\": [\"$BLOCK\"],
+      \"id\": 1
+    }" $URL)
+    echo "$RESPONSE" | jq . | tee -a getBlockReceipts.tmp
+    echo ""
+  else
+    RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
+      \"jsonrpc\": \"2.0\",
+      \"method\": \"eth_getBlockReceipts\",
+      \"params\": [\"$BLOCK\"],
+      \"id\": 1
+    }" $URL)
+    echo "$RESPONSE" >> getBlockReceipts.tmp
+    
+    # Check if request was successful
+    if echo "$RESPONSE" | jq -e '.result' > /dev/null 2>&1; then
+      RECEIPT_COUNT=$(echo "$RESPONSE" | jq -r '.result | length')
+      echo "✓ eth_getBlockReceipts: $RECEIPT_COUNT receipts found"
+    else
+      echo "✗ eth_getBlockReceipts: Failed or error"
+    fi
+  fi
+
+  # 3. eth_getTransactionReceipt (optional)
+  if [ -n "$TX_HASH" ]; then
+    if [ "$VERBOSE" == "true" ]; then
+      echo "--- 3. eth_getTransactionReceipt (Tx: $TX_HASH) ---"
+      RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
+        \"jsonrpc\": \"2.0\",
+        \"method\": \"eth_getTransactionReceipt\",
+        \"params\": [\"$TX_HASH\"],
+        \"id\": 1
+      }" $URL)
+      echo "$RESPONSE" | jq . | tee -a getTransactionReceipt.tmp
+      echo ""
+    else
+      RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
+        \"jsonrpc\": \"2.0\",
+        \"method\": \"eth_getTransactionReceipt\",
+        \"params\": [\"$TX_HASH\"],
+        \"id\": 1
+      }" $URL)
+      echo "$RESPONSE" >> getTransactionReceipt.tmp
+      
+      # Check if request was successful
+      if echo "$RESPONSE" | jq -e '.result' > /dev/null 2>&1; then
+        echo "✓ eth_getTransactionReceipt: Receipt found"
+      else
+        echo "✗ eth_getTransactionReceipt: Failed or not found"
+      fi
+    fi
   fi
 }
 
 # Backwards mode: loop from latest or given block backwards
-if [ "$1" == "-b" ]; then
-  START_BLOCK=${2:-"latest"}
+if [ "${ARGS[0]}" == "-b" ]; then
+  START_BLOCK=${ARGS[1]:-"latest"}
   
   # Get starting block number
   if [ "$START_BLOCK" == "latest" ]; then
@@ -93,12 +173,12 @@ if [ "$1" == "-b" ]; then
 fi
 
 # Offset mode: -n <offset>
-if [ "$1" == "-n" ]; then
-  OFFSET=$2
-  TX_HASH=$3
+if [ "${ARGS[0]}" == "-n" ]; then
+  OFFSET=${ARGS[1]}
+  TX_HASH=${ARGS[2]}
   
   if [ -z "$OFFSET" ]; then
-    echo "Usage: $0 -n <offset> [tx_hash]"
+    echo "Usage: $0 -n <offset> [tx_hash] [-v|--verbose]"
     exit 1
   fi
 
@@ -128,13 +208,16 @@ if [ "$1" == "-n" ]; then
 fi
 
 # Single block mode
-BLOCK=$1
-TX_HASH=$2
+BLOCK=${ARGS[0]}
+TX_HASH=${ARGS[1]}
 
 if [ -z "$BLOCK" ]; then
-  echo "Usage: $0 <block_number_or_hash> [tx_hash]"
-  echo "   or: $0 -n <offset_from_latest> [tx_hash]"
-  echo "   or: $0 -b [starting_block]  # Loop backwards (default: latest)"
+  echo "Usage: $0 <block_number_or_hash> [tx_hash] [-v|--verbose]"
+  echo "   or: $0 -n <offset_from_latest> [tx_hash] [-v|--verbose]"
+  echo "   or: $0 -b [starting_block] [-v|--verbose]  # Loop backwards (default: latest)"
+  echo ""
+  echo "Options:"
+  echo "  -v, --verbose    Show full JSON responses (default: quiet mode)"
   exit 1
 fi
 
