@@ -177,11 +177,9 @@ check_block_lag() {
   # Format block timestamp
   block_time_formatted=$(format_timestamp "$block_timestamp")
   
-  # Determine status
+  # Determine status (single threshold: OK or ERROR)
   if [ $lag -le $BLOCK_LAG_THRESHOLD ]; then
     status="OK"
-  elif [ $lag -le $((BLOCK_LAG_THRESHOLD * 2)) ]; then
-    status="WARN"
   else
     status="ERROR"
   fi
@@ -194,13 +192,11 @@ check_block_lag() {
     echo "$block_data" | jq .
   fi
   
-  # Return status code: 0=OK, 1=WARN, 2=ERROR
+  # Return status code: 0=OK, 1=ERROR
   if [ "$status" == "OK" ]; then
     return 0
-  elif [ "$status" == "WARN" ]; then
-    return 1
   else
-    return 2
+    return 1
   fi
 }
 
@@ -358,7 +354,7 @@ monitor_loop() {
       local lag_status=$?
       
       # Restart container if threshold exceeded (ERROR status)
-      if [ $lag_status -eq 2 ] && [ -n "$DOCKER_CONTAINER" ]; then
+      if [ $lag_status -eq 1 ] && [ -n "$DOCKER_CONTAINER" ]; then
         restart_docker_container "$DOCKER_CONTAINER"
       fi
     else
