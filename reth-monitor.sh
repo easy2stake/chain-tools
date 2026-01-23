@@ -8,6 +8,7 @@ TIMEOUT="${TIMEOUT:-10}"
 VERBOSE="${VERBOSE:-false}"
 LOG_FILE="${LOG_FILE:-$(dirname "$0")/reth-monitor.log}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
+DRY_RUN="${DRY_RUN:-false}"
 
 # Track last restart time to prevent too frequent restarts
 LAST_RESTART_TIME=0
@@ -22,6 +23,7 @@ Usage: $0 [OPTIONS]
 Options:
   -h, --help              Show this help message
   -v, --verbose           Enable verbose output
+  -d, --dry-run           Dry run mode (simulate restarts without actually restarting)
   -u, --url <url>         Override RETH_URL (default: $RETH_URL)
   -i, --interval <seconds> Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
   -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
@@ -37,6 +39,7 @@ Environment Variables:
   LOG_FILE                Path to log file
   DOCKER_CONTAINER        Docker container name to restart when threshold exceeded
   RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
+  DRY_RUN                 Dry run mode flag (true/false)
 
 Examples:
   $0
@@ -45,6 +48,7 @@ Examples:
   RETH_URL=http://localhost:8545 MONITOR_INTERVAL=60 $0
   $0 -l /var/log/reth-monitor.log
   $0 -c reth-node --threshold 120
+  $0 -c reth-node --dry-run  # Test without actually restarting
 
 EOF
   exit 0
@@ -218,14 +222,20 @@ restart_docker_container() {
   fi
   
   # Restart the container
-  log "Restarting Docker container: ${container_name}"
-  if docker restart "$container_name" > /dev/null 2>&1; then
+  if [ "$DRY_RUN" == "true" ]; then
+    log "[DRY RUN] Would restart Docker container: ${container_name}"
     LAST_RESTART_TIME=$current_time
-    log "Successfully restarted Docker container: ${container_name}"
     return 0
   else
-    log "ERROR: Failed to restart Docker container: ${container_name}"
-    return 1
+    log "Restarting Docker container: ${container_name}"
+    if docker restart "$container_name" > /dev/null 2>&1; then
+      LAST_RESTART_TIME=$current_time
+      log "Successfully restarted Docker container: ${container_name}"
+      return 0
+    else
+      log "ERROR: Failed to restart Docker container: ${container_name}"
+      return 1
+    fi
   fi
 }
 
@@ -270,8 +280,15 @@ monitor_loop() {
   
   log "Starting continuous monitoring (interval: ${MONITOR_INTERVAL}s, threshold: ${BLOCK_LAG_THRESHOLD}s)"
   log "Log file: $LOG_FILE"
+  if [ "$DRY_RUN" == "true" ]; then
+    log "DRY RUN MODE: Container restarts will be simulated only"
+  fi
   if [ -n "$DOCKER_CONTAINER" ]; then
-    log "Docker container restart enabled: ${DOCKER_CONTAINER} (cooldown: ${RESTART_COOLDOWN}s)"
+    if [ "$DRY_RUN" == "true" ]; then
+      log "Docker container restart enabled (DRY RUN): ${DOCKER_CONTAINER} (cooldown: ${RESTART_COOLDOWN}s)"
+    else
+      log "Docker container restart enabled: ${DOCKER_CONTAINER} (cooldown: ${RESTART_COOLDOWN}s)"
+    fi
   fi
   
   # Set up signal handlers
@@ -308,6 +325,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -v|--verbose)
       VERBOSE=true
+      shift
+      ;;
+    -d|--dry-run)
+      DRY_RUN=true
       shift
       ;;
     -u|--url)
