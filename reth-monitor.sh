@@ -8,6 +8,8 @@ TIMEOUT="${TIMEOUT:-10}"
 VERBOSE="${VERBOSE:-false}"
 LOG_FILE="${LOG_FILE:-$(dirname "$0")/reth-monitor.log}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
+CONTAINER_LOG_FOLDER="${CONTAINER_LOG_FOLDER:-}"
+HOST_LOG_DEST="${HOST_LOG_DEST:-$(dirname "$0")/container-logs}"
 DRY_RUN="${DRY_RUN:-false}"
 
 # Track last restart time to prevent too frequent restarts
@@ -29,6 +31,8 @@ Options:
   -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
   -l, --log-file <path>   Override LOG_FILE (default: $LOG_FILE)
   -c, --container <name>  Docker container name to restart when threshold exceeded
+  --container-logs <path> Path to log folder inside container to copy to host
+  --host-log-dest <path>  Destination folder on host for copied container logs (default: ./container-logs)
 
 Environment Variables:
   RETH_URL                RPC endpoint URL
@@ -38,6 +42,8 @@ Environment Variables:
   VERBOSE                 Verbose output flag (true/false)
   LOG_FILE                Path to log file
   DOCKER_CONTAINER        Docker container name to restart when threshold exceeded
+  CONTAINER_LOG_FOLDER    Path to log folder inside container to copy to host
+  HOST_LOG_DEST           Destination folder on host for copied container logs
   RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
   DRY_RUN                 Dry run mode flag (true/false)
 
@@ -49,6 +55,7 @@ Examples:
   $0 -l /var/log/reth-monitor.log
   $0 -c reth-node --threshold 120
   $0 -c reth-node --dry-run  # Test without actually restarting
+  $0 -c reth-node --container-logs /var/log/reth --host-log-dest ./logs
 
 EOF
   exit 0
@@ -197,6 +204,45 @@ check_block_lag() {
   fi
 }
 
+# Function to copy logs from container to host
+copy_container_logs() {
+  local container_name="$1"
+  local container_log_path="$2"
+  local host_dest="$3"
+  
+  if [ -z "$container_name" ] || [ -z "$container_log_path" ]; then
+    return 0  # Not an error, just skip if not configured
+  fi
+  
+  # Create destination directory if it doesn't exist
+  mkdir -p "$host_dest"
+  
+  # Generate timestamped destination folder
+  local timestamp=$(date '+%Y%m%d_%H%M%S')
+  local dest_folder="${host_dest}/${container_name}_${timestamp}"
+  
+  # Check if container exists
+  if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+    log "WARN: Docker container '${container_name}' not found, skipping log copy"
+    return 1
+  fi
+  
+  # Copy logs from container to host (works even if container is stopped)
+  # In dry-run mode, we still copy logs (only restart is skipped)
+  log "Copying logs from ${container_name}:${container_log_path} to ${dest_folder}"
+  if docker cp "${container_name}:${container_log_path}" "$dest_folder" > /dev/null 2>&1; then
+    if [ "$DRY_RUN" == "true" ]; then
+      log "[DRY RUN] Successfully copied logs to ${dest_folder}"
+    else
+      log "Successfully copied logs to ${dest_folder}"
+    fi
+    return 0
+  else
+    log "WARN: Failed to copy logs from container '${container_name}' (container may be stopped or path doesn't exist)"
+    return 1
+  fi
+}
+
 # Function to restart Docker container
 restart_docker_container() {
   local container_name="$1"
@@ -219,6 +265,11 @@ restart_docker_container() {
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
     log "ERROR: Docker container '${container_name}' not found"
     return 1
+  fi
+  
+  # Copy logs from container before restarting (if configured)
+  if [ -n "$CONTAINER_LOG_FOLDER" ]; then
+    copy_container_logs "$container_name" "$CONTAINER_LOG_FOLDER" "$HOST_LOG_DEST"
   fi
   
   # Restart the container
@@ -289,6 +340,9 @@ monitor_loop() {
     else
       log "Docker container restart enabled: ${DOCKER_CONTAINER} (cooldown: ${RESTART_COOLDOWN}s)"
     fi
+    if [ -n "$CONTAINER_LOG_FOLDER" ]; then
+      log "Container log copying enabled: ${CONTAINER_LOG_FOLDER} -> ${HOST_LOG_DEST}"
+    fi
   fi
   
   # Set up signal handlers
@@ -349,6 +403,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     -c|--container)
       DOCKER_CONTAINER="$2"
+      shift 2
+      ;;
+    --container-logs)
+      CONTAINER_LOG_FOLDER="$2"
+      shift 2
+      ;;
+    --host-log-dest)
+      HOST_LOG_DEST="$2"
       shift 2
       ;;
     *)
