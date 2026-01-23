@@ -7,6 +7,11 @@ BLOCK_LAG_THRESHOLD="${BLOCK_LAG_THRESHOLD:-60}"
 TIMEOUT="${TIMEOUT:-10}"
 VERBOSE="${VERBOSE:-false}"
 LOG_FILE="${LOG_FILE:-$(dirname "$0")/reth-monitor.log}"
+DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
+
+# Track last restart time to prevent too frequent restarts
+LAST_RESTART_TIME=0
+RESTART_COOLDOWN="${RESTART_COOLDOWN:-300}"  # 5 minutes default cooldown
 
 # Function to display usage information
 usage() {
@@ -21,6 +26,7 @@ Options:
   -i, --interval <seconds> Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
   -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
   -l, --log-file <path>   Override LOG_FILE (default: $LOG_FILE)
+  -c, --container <name>  Docker container name to restart when threshold exceeded
 
 Environment Variables:
   RETH_URL                RPC endpoint URL
@@ -29,6 +35,8 @@ Environment Variables:
   TIMEOUT                 Request timeout in seconds
   VERBOSE                 Verbose output flag (true/false)
   LOG_FILE                Path to log file
+  DOCKER_CONTAINER        Docker container name to restart when threshold exceeded
+  RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
 
 Examples:
   $0
@@ -36,6 +44,7 @@ Examples:
   $0 --url http://localhost:8545 --interval 60
   RETH_URL=http://localhost:8545 MONITOR_INTERVAL=60 $0
   $0 -l /var/log/reth-monitor.log
+  $0 -c reth-node --threshold 120
 
 EOF
   exit 0
@@ -174,7 +183,50 @@ check_block_lag() {
     echo "$block_data" | jq .
   fi
   
-  return 0
+  # Return status code: 0=OK, 1=WARN, 2=ERROR
+  if [ "$status" == "OK" ]; then
+    return 0
+  elif [ "$status" == "WARN" ]; then
+    return 1
+  else
+    return 2
+  fi
+}
+
+# Function to restart Docker container
+restart_docker_container() {
+  local container_name="$1"
+  
+  if [ -z "$container_name" ]; then
+    log "WARN: Docker container name not provided, skipping restart"
+    return 1
+  fi
+  
+  # Check if cooldown period has passed
+  local current_time=$(date +%s)
+  local time_since_restart=$((current_time - LAST_RESTART_TIME))
+  
+  if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
+    log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
+    return 1
+  fi
+  
+  # Check if container exists
+  if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+    log "ERROR: Docker container '${container_name}' not found"
+    return 1
+  fi
+  
+  # Restart the container
+  log "Restarting Docker container: ${container_name}"
+  if docker restart "$container_name" > /dev/null 2>&1; then
+    LAST_RESTART_TIME=$current_time
+    log "Successfully restarted Docker container: ${container_name}"
+    return 0
+  else
+    log "ERROR: Failed to restart Docker container: ${container_name}"
+    return 1
+  fi
 }
 
 # Function to validate RPC endpoint
@@ -218,6 +270,9 @@ monitor_loop() {
   
   log "Starting continuous monitoring (interval: ${MONITOR_INTERVAL}s, threshold: ${BLOCK_LAG_THRESHOLD}s)"
   log "Log file: $LOG_FILE"
+  if [ -n "$DOCKER_CONTAINER" ]; then
+    log "Docker container restart enabled: ${DOCKER_CONTAINER} (cooldown: ${RESTART_COOLDOWN}s)"
+  fi
   
   # Set up signal handlers
   trap cleanup SIGINT SIGTERM
@@ -229,6 +284,12 @@ monitor_loop() {
     if [ $? -eq 0 ] && [ -n "$block_data" ]; then
       # Check block lag
       check_block_lag "$block_data"
+      local lag_status=$?
+      
+      # Restart container if threshold exceeded (ERROR status)
+      if [ $lag_status -eq 2 ] && [ -n "$DOCKER_CONTAINER" ]; then
+        restart_docker_container "$DOCKER_CONTAINER"
+      fi
     else
       log "ERROR: Failed to fetch latest block"
     fi
@@ -265,6 +326,10 @@ while [[ $# -gt 0 ]]; do
       LOG_FILE="$2"
       shift 2
       ;;
+    -c|--container)
+      DOCKER_CONTAINER="$2"
+      shift 2
+      ;;
     *)
       ARGS+=("$1")
       shift
@@ -275,6 +340,12 @@ done
 # Check if jq is available
 if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq is required but not installed. Please install jq to use this script."
+  exit 1
+fi
+
+# Check if docker is available (if container name is provided)
+if [ -n "$DOCKER_CONTAINER" ] && ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: docker is required but not installed. Please install docker to use container restart feature."
   exit 1
 fi
 
