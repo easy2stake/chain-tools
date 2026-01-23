@@ -17,10 +17,10 @@ Usage: $0 [OPTIONS]
 Options:
   -h, --help              Show this help message
   -v, --verbose           Enable verbose output
-  --url <url>             Override RETH_URL (default: $RETH_URL)
-  --interval <seconds>    Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
-  --threshold <seconds>   Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
-  --log-file <path>       Override LOG_FILE (default: $LOG_FILE)
+  -u, --url <url>         Override RETH_URL (default: $RETH_URL)
+  -i, --interval <seconds> Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
+  -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
+  -l, --log-file <path>   Override LOG_FILE (default: $LOG_FILE)
 
 Environment Variables:
   RETH_URL                RPC endpoint URL
@@ -32,9 +32,10 @@ Environment Variables:
 
 Examples:
   $0
+  $0 -u http://localhost:8545 -i 60
   $0 --url http://localhost:8545 --interval 60
   RETH_URL=http://localhost:8545 MONITOR_INTERVAL=60 $0
-  $0 --log-file /var/log/reth-monitor.log
+  $0 -l /var/log/reth-monitor.log
 
 EOF
   exit 0
@@ -248,19 +249,19 @@ while [[ $# -gt 0 ]]; do
       VERBOSE=true
       shift
       ;;
-    --url)
+    -u|--url)
       RETH_URL="$2"
       shift 2
       ;;
-    --interval)
+    -i|--interval)
       MONITOR_INTERVAL="$2"
       shift 2
       ;;
-    --threshold)
+    -t|--threshold)
       BLOCK_LAG_THRESHOLD="$2"
       shift 2
       ;;
-    --log-file)
+    -l|--log-file)
       LOG_FILE="$2"
       shift 2
       ;;
