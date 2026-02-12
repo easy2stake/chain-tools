@@ -204,7 +204,11 @@ else
             result=$(get_tx_from_block_or_nearby "$s" 50)
             ((tx_iterations++)) || true
             if [[ -z "$result" ]]; then
-                echo "no block with txs in range"
+                low=$((s - 50))
+                [[ $low -lt 1 ]] && low=1
+                high=$((s + 50))
+                [[ $high -gt current_dec ]] && high=$current_dec
+                echo "no block with txs in range (blocks $low..$high)"
             else
                 blk=$(echo "$result" | cut -d' ' -f1)
                 h=$(echo "$result" | cut -d' ' -f2)

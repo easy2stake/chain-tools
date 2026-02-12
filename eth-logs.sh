@@ -1,27 +1,97 @@
 #!/bin/bash
 
-URL="http://127.0.0.1:18585"
+show_help() {
+  cat << 'EOF'
+eth-logs.sh - Query Ethereum JSON-RPC for logs and receipts
+
+USAGE:
+  eth-logs.sh [URL] <block> [tx_hash] [options]
+  eth-logs.sh [URL] -n <offset> [tx_hash] [options]
+  eth-logs.sh [URL] -b [starting_block] [options]
+
+MODES:
+  Single block    Query one block (default: latest)
+  -n <offset>     Query block at (latest - offset)
+  -b [block]      Loop backwards from block (default: latest); Ctrl+C to stop
+
+ARGUMENTS:
+  URL             RPC endpoint (http://host:port or host:port). If omitted, uses http://127.0.0.1:18585
+  block           Block number (hex 0xNNN or decimal) or "latest"
+  tx_hash         Optional tx hash to also fetch eth_getTransactionReceipt
+
+OPTIONS:
+  -h, --help      Show this help
+  -v, --verbose   Show full JSON responses (default: quiet mode)
+
+EXAMPLES:
+  eth-logs.sh                                    # latest block, local node
+  eth-logs.sh http://88.198.52.126:18885         # latest block, remote node
+  eth-logs.sh 157.90.91.196:8545                # host:port (http:// added automatically)
+  eth-logs.sh http://localhost:8545 0x12345      # specific block (hex)
+  eth-logs.sh 157.90.91.196:8545 99998          # block by decimal
+  eth-logs.sh -n 5                               # 5 blocks behind latest
+  eth-logs.sh -n 10 0xabc...                     # offset + tx receipt
+  eth-logs.sh -b                                 # loop backwards from latest
+  eth-logs.sh -b 0x1000                          # loop backwards from block
+  eth-logs.sh -v                                 # verbose (full JSON)
+EOF
+}
+
+URL="${1:-http://127.0.0.1:18585}"
 VERBOSE=false
 
-# Parse for verbose flag
+# Parse for help and verbose flags
 for arg in "$@"; do
+  if [ "$arg" == "-h" ] || [ "$arg" == "--help" ]; then
+    show_help
+    exit 0
+  fi
   if [ "$arg" == "-v" ] || [ "$arg" == "--verbose" ]; then
     VERBOSE=true
   fi
 done
 
-# Remove verbose flag from arguments
+# Remove help and verbose flags from arguments
 ARGS=()
 for arg in "$@"; do
-  if [ "$arg" != "-v" ] && [ "$arg" != "--verbose" ]; then
+  if [ "$arg" != "-h" ] && [ "$arg" != "--help" ] && [ "$arg" != "-v" ] && [ "$arg" != "--verbose" ]; then
     ARGS+=("$arg")
   fi
 done
+
+# If first arg looks like a URL, use it as URL and shift: block becomes next arg (default: latest)
+if [[ "${ARGS[0]}" == http://* ]] || [[ "${ARGS[0]}" == https://* ]]; then
+  URL="${ARGS[0]}"
+  ARGS=("${ARGS[@]:1}")
+  # If no block specified after URL, default to latest
+  if [ ${#ARGS[@]} -eq 0 ]; then
+    ARGS=("latest")
+  fi
+elif [[ "${ARGS[0]}" == *:* ]] && [[ "${ARGS[0]}" != 0x* ]]; then
+  # host:port format (e.g. 157.90.91.196:8545) - add http://
+  URL="http://${ARGS[0]}"
+  ARGS=("${ARGS[@]:1}")
+  if [ ${#ARGS[@]} -eq 0 ]; then
+    ARGS=("latest")
+  fi
+fi
+
+# Convert block to hex if decimal (JSON-RPC expects 0xNNN or "latest"/"earliest"/"pending")
+to_hex_block() {
+  local b="$1"
+  case "$b" in
+    latest|earliest|pending)  echo "$b" ;;
+    0x*)                     echo "$b" ;;
+    [0-9]*)                  printf "0x%x" "$b" ;;
+    *)                       echo "$b" ;;
+  esac
+}
 
 # Function to query a single block
 query_block() {
   local BLOCK=$1
   local TX_HASH=$2
+  BLOCK=$(to_hex_block "$BLOCK")
   
   # 1. eth_getLogs
   if [ "$VERBOSE" == "true" ]; then
@@ -72,6 +142,10 @@ query_block() {
       \"id\": 1
     }" $URL)
     echo "$RESPONSE" | jq . | tee -a getBlockReceipts.tmp
+    if echo "$RESPONSE" | jq -e '.result' > /dev/null 2>&1; then
+      RECEIPT_COUNT=$(echo "$RESPONSE" | jq -r '.result | length')
+      echo "✓ Transactions: $RECEIPT_COUNT"
+    fi
     echo ""
   else
     RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -m 10 -d "{
@@ -86,6 +160,7 @@ query_block() {
     if echo "$RESPONSE" | jq -e '.result' > /dev/null 2>&1; then
       RECEIPT_COUNT=$(echo "$RESPONSE" | jq -r '.result | length')
       echo "✓ eth_getBlockReceipts: $RECEIPT_COUNT receipts found"
+      echo "✓ Transactions: $RECEIPT_COUNT"
     else
       echo "✗ eth_getBlockReceipts: Failed or error"
     fi
@@ -178,7 +253,7 @@ if [ "${ARGS[0]}" == "-n" ]; then
   TX_HASH=${ARGS[2]}
   
   if [ -z "$OFFSET" ]; then
-    echo "Usage: $0 -n <offset> [tx_hash] [-v|--verbose]"
+    echo "Error: -n requires an offset. Run '$0 --help' for usage."
     exit 1
   fi
 
@@ -212,12 +287,8 @@ BLOCK=${ARGS[0]}
 TX_HASH=${ARGS[1]}
 
 if [ -z "$BLOCK" ]; then
-  echo "Usage: $0 <block_number_or_hash> [tx_hash] [-v|--verbose]"
-  echo "   or: $0 -n <offset_from_latest> [tx_hash] [-v|--verbose]"
-  echo "   or: $0 -b [starting_block] [-v|--verbose]  # Loop backwards (default: latest)"
-  echo ""
-  echo "Options:"
-  echo "  -v, --verbose    Show full JSON responses (default: quiet mode)"
+  echo "Error: No block specified."
+  echo "Run '$0 --help' for usage."
   exit 1
 fi
 
