@@ -3,10 +3,11 @@
 # Fast block history and tx indexer checker for Bor/Polygon nodes.
 # Python equivalent with threaded sampling for speed.
 
+import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import requests
@@ -26,8 +27,9 @@ def print_help() -> None:
     script = sys.argv[0].split("/")[-1]
     print(f"""Usage: {script} RPC_URL
 
-Fast block history and tx indexer checker for Bor/Polygon nodes.
+Fast block history, tx indexer, and archival state checker for Bor/Polygon nodes.
 Uses binary search + threaded sampling to minimize round trips.
+Tests: block history, tx index (eth_getTransactionByHash), archival state (eth_getBalance).
 
 Arguments:
   RPC_URL    JSON-RPC endpoint (required)
@@ -42,20 +44,26 @@ Environment:
 
 Options:
   -h, --help     Show this help
+  -v, --verbose  Dump RPC requests and responses
 """)
 
 
-def parse_args() -> Optional[str]:
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if not args or "-h" in sys.argv or "--help" in sys.argv:
+def parse_args() -> Optional[Tuple[str, bool]]:
+    if "-h" in sys.argv or "--help" in sys.argv:
         print_help()
         return None
-    return args[0]
+    verbose = "-v" in sys.argv or "--verbose" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not args:
+        print_help()
+        return None
+    return (args[0], verbose)
 
 
-RPC_URL = parse_args()
-if RPC_URL is None:
+_parsed = parse_args()
+if _parsed is None:
     sys.exit(0)
+RPC_URL, VERBOSE = _parsed
 
 TIMEOUT = int(os.environ.get("CHECK_TIMEOUT", "10"))
 
@@ -63,11 +71,21 @@ TIMEOUT = int(os.environ.get("CHECK_TIMEOUT", "10"))
 def rpc(method: str, *params) -> Optional[dict]:
     payload = {"jsonrpc": "2.0", "method": method, "params": list(params), "id": 1}
     try:
+        if VERBOSE:
+            print(f"  {YELLOW}[RPC] → {method}{NC} {json.dumps(list(params))}")
         r = requests.post(RPC_URL, json=payload, timeout=TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        return data.get("result")
-    except Exception:
+        result = data.get("result")
+        if VERBOSE:
+            out = json.dumps(result)
+            if len(out) > 500:
+                out = out[:500] + "..."
+            print(f"  {YELLOW}[RPC] ← {method}{NC} {out}")
+        return result
+    except Exception as e:
+        if VERBOSE:
+            print(f"  {RED}[RPC] ✗ {method}{NC} {e}")
         return None
 
 
@@ -87,10 +105,22 @@ def get_block_tx_hash(block_num: int) -> Optional[str]:
     return tx if isinstance(tx, str) else tx.get("hash")
 
 
-def tx_lookup_works(tx_hash: Optional[str]) -> bool:
+def get_tx_by_hash(tx_hash: Optional[str]) -> Optional[dict]:
+    """Fetch full tx by hash. Returns tx dict or None."""
     if not tx_hash:
+        return None
+    return rpc("eth_getTransactionByHash", tx_hash)
+
+
+def tx_lookup_works(tx_hash: Optional[str]) -> bool:
+    return get_tx_by_hash(tx_hash) is not None
+
+
+def archival_balance_works(address: str, block_num: int) -> bool:
+    """Check if eth_getBalance works at historical block (archival state test)."""
+    if not address:
         return False
-    result = rpc("eth_getTransactionByHash", tx_hash)
+    result = rpc("eth_getBalance", address, hex(block_num))
     return result is not None
 
 
@@ -132,7 +162,7 @@ def main() -> None:
     print()
 
     # 1. Get current block
-    print(f"{CYAN}[1/3]{NC} Fetching current block...")
+    print(f"{CYAN}[1/4]{NC} Fetching current block...")
     current_block = rpc("eth_blockNumber")
     if current_block is None:
         print(f"{RED}ERROR: Cannot connect to RPC or get block number{NC}")
@@ -142,7 +172,7 @@ def main() -> None:
     print()
 
     # 2. Binary search for earliest available block
-    print(f"{CYAN}[2/3]{NC} Checking block history (binary search)...")
+    print(f"{CYAN}[2/4]{NC} Checking block history (binary search)...")
     low, high = 1, current_dec
     iterations = 0
     earliest_block = 1
@@ -198,10 +228,14 @@ def main() -> None:
     print(f"      (used {iterations} block queries)")
     print()
 
-    # 3. Tx indexer check
-    print(f"{CYAN}[3/3]{NC} Checking tx indexer (binary search)...")
+    # 3. Tx indexer + archival check
+    print(f"{CYAN}[3/4]{NC} Checking tx indexer and archival state (binary search)...")
     tx_iterations = 0
     tx_indexer_earliest = "N/A"
+    archival_earliest = "N/A"
+    archival_working = current_dec
+    archival_failing = earliest_block
+    archival_tested = False
 
     samples = [1, 100, 1000, 10000, 100000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000]
 
@@ -213,13 +247,22 @@ def main() -> None:
     else:
         recent_block, recent_tx = recent_result
         tx_iterations += 1
-        if tx_lookup_works(recent_tx):
-            print(f"      Testing block {recent_block}, tx {recent_tx} → {GREEN}✓ lookup OK{NC}")
+        recent_tx_obj = get_tx_by_hash(recent_tx)
+        if recent_tx_obj is not None:
+            archival_str = ""
+            if recent_tx_obj.get("from"):
+                from_addr = recent_tx_obj["from"]
+                tx_iterations += 1
+                ar = archival_balance_works(from_addr, recent_block)
+                archival_tested = True
+                ar_icon = f"{GREEN}✓{NC}" if ar else f"{RED}✗{NC}"
+                archival_str = f", archival {ar_icon}\n        eth_getBalance({from_addr}, block {recent_block})"
+            print(f"      Testing block {recent_block}, tx {recent_tx} → {GREEN}✓ lookup OK{NC}{archival_str}")
             tx_working = current_dec
             tx_failing = earliest_block
 
             # Threaded sampling
-            print("      Sampling blocks to find tx indexer boundary (parallel)...")
+            print("      Sampling blocks to find tx indexer / archival boundary (parallel)...")
             sample_results: list[
                 tuple[int, str | tuple[int, int] | tuple[int, str], tuple[int, int] | None]
             ] = []
@@ -244,7 +287,7 @@ def main() -> None:
                     except Exception as e:
                         sample_results.append((s, ("error", str(e)), None))
 
-            # Sort by sample and print in order; stop at first failure
+            # Sort by sample and print in order; stop at first tx indexer failure
             sample_results.sort(key=lambda x: x[0])
             for sample, status, extra in sample_results:
                 if status == "skipped":
@@ -257,10 +300,25 @@ def main() -> None:
                 elif isinstance(status, tuple) and len(status) == 2 and isinstance(status[0], int):
                     blk, h = status
                     tx_iterations += 1
-                    indexed = tx_lookup_works(h)
+                    tx_obj = get_tx_by_hash(h)
+                    indexed = tx_obj is not None
                     if indexed:
+                        archival_ok = None
+                        from_addr = tx_obj.get("from") if tx_obj else None
+                        if tx_obj and from_addr:
+                            tx_iterations += 1
+                            archival_ok = archival_balance_works(from_addr, blk)
+                            archival_tested = True
+                            if archival_ok:
+                                archival_working = min(archival_working, blk)
+                            else:
+                                archival_failing = blk
+                        archival_str = ""
+                        if archival_ok is not None:
+                            ar_icon = f"{GREEN}✓{NC}" if archival_ok else f"{RED}✗{NC}"
+                            archival_str = f", archival {ar_icon}\n          eth_getBalance({from_addr}, block {blk})"
                         print(
-                            f"        Sample block {sample}: block {blk}, tx {h} → {GREEN}✓ indexed{NC}"
+                            f"        Sample block {sample}: block {blk}, tx {h} → {GREEN}✓ indexed{NC}{archival_str}"
                         )
                         if blk < tx_working:
                             tx_working = blk
@@ -286,7 +344,8 @@ def main() -> None:
                     if result is not None:
                         blk, h = result
                         tx_iterations += 1
-                        if tx_lookup_works(h):
+                        tx_obj = get_tx_by_hash(h)
+                        if tx_obj is not None:
                             high = mid
                         else:
                             low = mid + 1
@@ -302,13 +361,49 @@ def main() -> None:
             else:
                 tx_indexer_earliest = tx_working
                 print(f"      {GREEN}Tx indexer available from block ~{tx_indexer_earliest}{NC}")
+
+            # Archival binary search (if we found a boundary)
+            if archival_tested and archival_failing > archival_working:
+                print(
+                    f"      Binary search for archival boundary (block {archival_working} ✓ vs {archival_failing} ✗)..."
+                )
+                low, high = archival_working, archival_failing
+                while low < high:
+                    mid = (low + high) // 2
+                    result = get_tx_from_block_or_nearby(mid, 20, current_dec)
+                    tx_iterations += 1
+                    if result is not None:
+                        blk, h = result
+                        tx_obj = get_tx_by_hash(h)
+                        tx_iterations += 1
+                        if tx_obj and tx_obj.get("from"):
+                            tx_iterations += 1
+                            if archival_balance_works(tx_obj["from"], blk):
+                                high = mid
+                            else:
+                                low = mid + 1
+                        else:
+                            low = mid + 1
+                    else:
+                        low = mid + 1
+                archival_earliest = low
+                print(f"      {YELLOW}Archival state (eth_getBalance) available from block ~{archival_earliest}{NC}")
+            elif archival_tested and (archival_working == 1 or (earliest_block == 1 and archival_working <= 1000)):
+                archival_earliest = 1
+                print(
+                    f"      {GREEN}✓ Full archival state from block 1 (eth_getBalance works for entire chain){NC}"
+                )
+            elif archival_tested and archival_failing <= archival_working:
+                archival_earliest = archival_working
+                print(f"      {GREEN}Archival state available from block ~{archival_earliest}{NC}")
         else:
             print(f"      Block {recent_block}, tx {recent_tx} → {RED}✗ lookup failed{NC}")
 
     print(f"      (used ~{tx_iterations} queries)")
     print()
 
-    # Summary
+    # 4. Summary
+    print(f"{CYAN}[4/4]{NC} Summary")
     print(f"{CYAN}=== Summary ==={NC}")
     eb = earliest_block or 1
     print(f"Block range:          {eb} → {current_dec}")
@@ -324,6 +419,15 @@ def main() -> None:
     else:
         print(
             f"{YELLOW}Partial - from block ~{tx_indexer_earliest} (older txs not lookupable by hash){NC}"
+        )
+    print("Archival state:        ", end="")
+    if archival_earliest == 1:
+        print(f"{GREEN}✓ FULL (eth_getBalance works at historical blocks){NC}")
+    elif archival_earliest == "N/A":
+        print(f"{YELLOW}N/A (could not verify){NC}")
+    else:
+        print(
+            f"{YELLOW}Partial - from block ~{archival_earliest} (older state not queryable){NC}"
         )
     print()
 
