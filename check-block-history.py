@@ -116,6 +116,13 @@ def tx_lookup_works(tx_hash: Optional[str]) -> bool:
     return get_tx_by_hash(tx_hash) is not None
 
 
+def _short_addr(addr: str, head: int = 6, tail: int = 4) -> str:
+    """Shorten address for display: 0x1234...abcd."""
+    if not addr or len(addr) <= head + tail + 2:
+        return addr
+    return f"{addr[:head+2]}...{addr[-tail:]}"
+
+
 def archival_balance_works(address: str, block_num: int) -> bool:
     """Check if eth_getBalance works at historical block (archival state test)."""
     if not address:
@@ -247,8 +254,11 @@ def main() -> None:
         b = b // 2
     if 1 not in samples:
         samples.append(1)
-    # Always include the most recent 129 blocks
-    samples.extend(range(max(1, current_dec - 128), current_dec + 1))
+    # Always include past 100000 blocks in 10000 increments
+    for i in range(11):
+        b = current_dec - i * 10000
+        if b >= 1:
+            samples.append(b)
     samples = sorted(set(samples))
 
     recent_result = get_tx_from_block_or_nearby(current_dec, 500, current_dec)
@@ -261,15 +271,15 @@ def main() -> None:
         tx_iterations += 1
         recent_tx_obj = get_tx_by_hash(recent_tx)
         if recent_tx_obj is not None:
-            archival_str = ""
+            print(f"      Testing blk {recent_block}")
+            print(f"        tx: {recent_tx} → {GREEN}✓ lookup OK{NC}")
             if recent_tx_obj.get("from"):
                 from_addr = recent_tx_obj["from"]
                 tx_iterations += 1
                 ar = archival_balance_works(from_addr, recent_block)
                 archival_tested = True
                 ar_icon = f"{GREEN}✓{NC}" if ar else f"{RED}✗{NC}"
-                archival_str = f", archival {ar_icon}\n        eth_getBalance({from_addr}, block {recent_block})"
-            print(f"      Testing block {recent_block}, tx {recent_tx} → {GREEN}✓ lookup OK{NC}{archival_str}")
+                print(f"        {ar_icon} archival: [eth_getBalance({_short_addr(from_addr)}, {recent_block})]")
             tx_working = current_dec
             tx_failing = earliest_block
 
@@ -307,7 +317,7 @@ def main() -> None:
                 elif status == "no_tx":
                     low, high = extra
                     print(
-                        f"        Sample block {sample}: no block with txs in range (blocks {low}..{high})"
+                        f"        Sample {sample}: no block with txs in range (blocks {low}..{high})"
                     )
                 elif isinstance(status, tuple) and len(status) == 2 and isinstance(status[0], int):
                     blk, h = status
@@ -325,19 +335,16 @@ def main() -> None:
                                 archival_working = min(archival_working, blk)
                             else:
                                 archival_failing = blk
-                        archival_str = ""
+                        print(f"        Sample {sample}: blk {blk}")
+                        print(f"            tx: {h} → {GREEN}✓ indexed{NC}")
                         if archival_ok is not None:
                             ar_icon = f"{GREEN}✓{NC}" if archival_ok else f"{RED}✗{NC}"
-                            archival_str = f", archival {ar_icon}\n          eth_getBalance({from_addr}, block {blk})"
-                        print(
-                            f"        Sample block {sample}: block {blk}, tx {h} → {GREEN}✓ indexed{NC}{archival_str}"
-                        )
+                            print(f"            {ar_icon} archival: [eth_getBalance({_short_addr(from_addr)}, {blk})]")
                         if blk < tx_working:
                             tx_working = blk
                     else:
-                        print(
-                            f"        Sample block {sample}: block {blk}, tx {h} → {RED}✗ not indexed{NC}"
-                        )
+                        print(f"        Sample {sample}: blk {blk}")
+                        print(f"            tx: {h} → {RED}✗ not indexed{NC}")
                         tx_failing = blk
                         break
                 elif isinstance(status, tuple) and status[0] == "error":
