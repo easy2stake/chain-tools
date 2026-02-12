@@ -196,19 +196,24 @@ else
         echo "      Sampling blocks to find tx indexer boundary..."
         samples=(1 100 1000 10000 100000 500000 1000000 2000000 3000000 4000000 5000000)
         for s in "${samples[@]}"; do
-            [[ $s -gt $current_dec ]] && continue
-            [[ $s -lt $earliest_block ]] && continue
+            if [[ $s -gt $current_dec ]] || [[ $s -lt $earliest_block ]]; then
+                echo "        Sample $s: skipped (out of block range)"
+                continue
+            fi
+            echo -n "        Sample block $s: "
             result=$(get_tx_from_block_or_nearby "$s" 50)
             ((tx_iterations++)) || true
-            if [[ -n "$result" ]]; then
+            if [[ -z "$result" ]]; then
+                echo "no block with txs in range"
+            else
                 blk=$(echo "$result" | cut -d' ' -f1)
                 h=$(echo "$result" | cut -d' ' -f2)
                 if tx_lookup_works "$h"; then
                     ((tx_iterations++)) || true
-                    echo -e "        block $blk, tx $h → ${GREEN}✓${NC}"
+                    echo -e "block $blk, tx $h → ${GREEN}✓ indexed${NC}"
                     [[ $blk -lt $tx_working ]] && tx_working=$blk
                 else
-                    echo -e "        block $blk, tx $h → ${RED}✗ (not indexed)${NC}"
+                    echo -e "block $blk, tx $h → ${RED}✗ not indexed${NC}"
                     tx_failing=$blk
                     break
                 fi
