@@ -2,11 +2,6 @@
 #
 # Fast block history and tx indexer checker for Bor/Polygon nodes.
 # Python equivalent with threaded sampling for speed.
-#
-# Usage: ./check-block-history.py [RPC_URL]
-# Example: ./check-block-history.py http://localhost:8745
-#
-# With auth path: ./check-block-history.py http://localhost:8745/yourAuthPath/
 
 import os
 import sys
@@ -26,7 +21,42 @@ YELLOW = "\033[1;33m"
 CYAN = "\033[0;36m"
 NC = "\033[0m"
 
-RPC_URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8545"
+
+def print_help() -> None:
+    script = sys.argv[0].split("/")[-1]
+    print(f"""Usage: {script} RPC_URL
+
+Fast block history and tx indexer checker for Bor/Polygon nodes.
+Uses binary search + threaded sampling to minimize round trips.
+
+Arguments:
+  RPC_URL    JSON-RPC endpoint (required)
+
+Examples:
+  {script} http://localhost:8545
+  {script} http://localhost:8745
+  {script} http://localhost:8745/yourAuthPath
+
+Environment:
+  CHECK_TIMEOUT  RPC timeout in seconds (default: 10)
+
+Options:
+  -h, --help     Show this help
+""")
+
+
+def parse_args() -> Optional[str]:
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not args or "-h" in sys.argv or "--help" in sys.argv:
+        print_help()
+        return None
+    return args[0]
+
+
+RPC_URL = parse_args()
+if RPC_URL is None:
+    sys.exit(0)
+
 TIMEOUT = int(os.environ.get("CHECK_TIMEOUT", "10"))
 
 
