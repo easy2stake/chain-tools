@@ -284,7 +284,7 @@ def main() -> None:
                 ar = archival_balance_works(from_addr, recent_block)
                 archival_tested = True
                 ar_icon = f"{GREEN}✓{NC}" if ar else f"{RED}✗{NC}"
-                print(f"        {ar_icon} archival: [eth_getBalance({_short_addr(from_addr)}, {recent_block})]")
+                print(f"        {ar_icon} archival: [eth_getBalance({from_addr}, {recent_block})]")
             tx_working = current_dec
             tx_failing = earliest_block
 
@@ -441,8 +441,9 @@ def main() -> None:
     elif tx_indexer_earliest == "N/A":
         print(f"{YELLOW}N/A (could not verify){NC}")
     else:
+        tx_indexed_blocks = current_dec - tx_indexer_earliest
         print(
-            f"{YELLOW}Partial - from block ~{tx_indexer_earliest} (older txs not lookupable by hash){NC}"
+            f"{YELLOW}Partial - from block ~{tx_indexer_earliest} ({tx_indexed_blocks:,} blocks indexed, older txs not lookupable by hash){NC}"
         )
     print("Archival state:        ", end="")
     if archival_earliest == 1:
@@ -450,8 +451,9 @@ def main() -> None:
     elif archival_earliest == "N/A":
         print(f"{YELLOW}N/A (could not verify){NC}")
     else:
+        archival_blocks = current_dec - archival_earliest
         print(
-            f"{YELLOW}Partial - from block ~{archival_earliest} (older state not queryable){NC}"
+            f"{YELLOW}Partial - from block ~{archival_earliest} ({archival_blocks:,} blocks with archival state, older state not queryable){NC}"
         )
     print()
 
