@@ -259,6 +259,11 @@ def main() -> None:
         b = current_dec - i * 10000
         if b >= 1:
             samples.append(b)
+    # Always include past 1000 blocks in 100 increments
+    for i in range(11):
+        b = current_dec - i * 100
+        if b >= 1:
+            samples.append(b)
     samples = sorted(set(samples))
 
     recent_result = get_tx_from_block_or_nearby(current_dec, 500, current_dec)
