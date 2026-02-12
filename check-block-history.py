@@ -344,7 +344,7 @@ def main() -> None:
                         print(f"            tx: {h} → {GREEN}✓ indexed{NC}")
                         if archival_ok is not None:
                             ar_icon = f"{GREEN}✓{NC}" if archival_ok else f"{RED}✗{NC}"
-                            print(f"            {ar_icon} archival: [eth_getBalance({_short_addr(from_addr)}, {blk})]")
+                            print(f"            {ar_icon} archival: [eth_getBalance({from_addr}, {blk})]")
                         if blk < tx_working:
                             tx_working = blk
                     else:
