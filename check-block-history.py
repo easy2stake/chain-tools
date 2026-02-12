@@ -237,7 +237,19 @@ def main() -> None:
     archival_failing = earliest_block
     archival_tested = False
 
-    samples = [1, 100, 1000, 10000, 100000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000]
+    # Derive samples from current block inwards towards 1 (halving each step)
+    samples = []
+    b = current_dec
+    while b >= 1:
+        samples.append(int(b))
+        if len(samples) >= 12:
+            break
+        b = b // 2
+    if 1 not in samples:
+        samples.append(1)
+    # Always include the most recent 129 blocks
+    samples.extend(range(max(1, current_dec - 128), current_dec + 1))
+    samples = sorted(set(samples))
 
     recent_result = get_tx_from_block_or_nearby(current_dec, 500, current_dec)
     tx_iterations += 1
