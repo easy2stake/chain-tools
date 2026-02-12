@@ -254,8 +254,8 @@ def main() -> None:
         b = b // 2
     if 1 not in samples:
         samples.append(1)
-    # Always include past 100000 blocks in 10000 increments
-    for i in range(11):
+    # Always include past 200000 blocks in 10000 increments
+    for i in range(21):
         b = current_dec - i * 10000
         if b >= 1:
             samples.append(b)
