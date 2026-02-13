@@ -43,27 +43,45 @@ Environment:
   CHECK_TIMEOUT  RPC timeout in seconds (default: 10)
 
 Options:
-  -h, --help     Show this help
-  -v, --verbose  Dump RPC requests and responses
+  -h, --help        Show this help
+  -v, --verbose     Dump RPC requests and responses
+  --increments N    Step (decrement) when sampling backwards over the "past ~200k blocks" range.
+                    N must be > 1000. Use on forked chains where genesis is not block 1.
 """)
 
 
-def parse_args() -> Optional[Tuple[str, bool]]:
+def parse_args() -> Optional[Tuple[str, bool, Optional[int]]]:
     if "-h" in sys.argv or "--help" in sys.argv:
         print_help()
         return None
     verbose = "-v" in sys.argv or "--verbose" in sys.argv
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    argv = sys.argv[1:]
+    decrement: Optional[int] = None
+    if "--increments" in argv:
+        idx = argv.index("--increments")
+        if idx + 1 >= len(argv):
+            print("Error: --increments requires a value (e.g. --increments 50000)", file=sys.stderr)
+            sys.exit(1)
+        try:
+            decrement = int(argv[idx + 1])
+        except ValueError:
+            print("Error: --increments value must be an integer", file=sys.stderr)
+            sys.exit(1)
+        if decrement <= 1000:
+            print("Error: --increments value must be greater than 1000", file=sys.stderr)
+            sys.exit(1)
+        argv = argv[:idx] + argv[idx + 2:]
+    args = [a for a in argv if not a.startswith("-")]
     if not args:
         print_help()
         return None
-    return (args[0], verbose)
+    return (args[0], verbose, decrement)
 
 
 _parsed = parse_args()
 if _parsed is None:
     sys.exit(0)
-RPC_URL, VERBOSE = _parsed
+RPC_URL, VERBOSE, DECREMENT = _parsed
 
 TIMEOUT = int(os.environ.get("CHECK_TIMEOUT", "10"))
 
@@ -243,30 +261,33 @@ def main() -> None:
     archival_failing = earliest_block
     archival_tested = False
 
-    # Derive samples from current block inwards towards 1 (halving each step)
+    # Floor: don't sample below chain genesis (e.g. forked chains where first block > 1)
+    floor = earliest_block
+    # Derive samples from current block inwards towards genesis (halving each step)
     samples = []
     b = current_dec
-    while b >= 1:
+    while b >= floor:
         samples.append(int(b))
         if len(samples) >= 12:
             break
         b = b // 2
-    if 1 not in samples:
-        samples.append(1)
-    # Always include past 200000 blocks in 10000 increments
+    if floor not in samples:
+        samples.append(floor)
+    # Past ~200k blocks: fixed 10000 decrement, or --increments N (N > 1000) when provided
+    step = (DECREMENT if DECREMENT is not None else 10000)
     for i in range(21):
-        b = current_dec - i * 10000
-        if b >= 1:
+        b = current_dec - i * step
+        if b >= floor:
             samples.append(b)
-    # Always include past 1000 blocks in 100 increments
+    # Always include past 1000 blocks in 100 decrements
     for i in range(11):
         b = current_dec - i * 100
-        if b >= 1:
+        if b >= floor:
             samples.append(b)
-    # Always include past 130 blocks in 10 increments
+    # Always include past 130 blocks in 10 decrements
     for i in range(14):
         b = current_dec - i * 10
-        if b >= 1:
+        if b >= floor:
             samples.append(b)
     samples = sorted(set(samples))
 

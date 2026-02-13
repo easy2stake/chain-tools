@@ -70,11 +70,11 @@ def get_json(endpoint):
 def check_sync_status():
     data = get_json("/eth/v1/node/syncing")
     if data is None:
-        print(f"{script_name}: Sync check timed out. Exiting script.")
+        print(f"{script_name}: Sync check failed. Exiting script.")
         sys.exit(1)
     log_debug(f"check_sync_status: {data}")
     if data.get("data", {}).get("is_syncing") is True:
-        print("f{script_name}: Node is syncing or sync status unknown")
+        print(f"{script_name}: Node is syncing or sync status unknown")
         return False, "syncing or unknown"
     return True, "synced"
 
