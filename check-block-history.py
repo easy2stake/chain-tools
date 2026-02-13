@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 #
-# Fast block history and tx indexer checker for Bor/Polygon nodes.
+# Fast block history and tx indexer checker for any EVM-compatible chain.
 # Uses binary search to find block history, tx indexer, and archival boundaries.
 
+import argparse
 import json
-import os
 import sys
 from typing import Optional, Tuple
 
@@ -22,15 +22,14 @@ CYAN = "\033[0;36m"
 NC = "\033[0m"
 
 
-def print_help() -> None:
+def parse_args() -> argparse.Namespace:
     script = sys.argv[0].split("/")[-1]
-    print(f"""Usage: {script} RPC_URL
-
-Fast block history, tx indexer, and archival state checker for Bor/Polygon nodes.
-Uses binary search to minimize RPC round trips.
-Tests: block history, tx index (eth_getTransactionByHash), archival state (eth_getBalance).
-
-Flow:
+    parser = argparse.ArgumentParser(
+        prog=script,
+        description="Fast block history, tx indexer, and archival state checker for any EVM-compatible chain. "
+        "Uses binary search to minimize RPC round trips. "
+        "Tests: block history, tx index (eth_getTransactionByHash), archival state (eth_getBalance).",
+        epilog="""Flow:
   [1] Get current block (eth_blockNumber)
        |
        v
@@ -45,41 +44,40 @@ Flow:
        v
   Summary
 
-Arguments:
-  RPC_URL    JSON-RPC endpoint (required)
-
 Examples:
-  {script} http://localhost:8545
-  {script} http://localhost:8745
-  {script} http://localhost:8745/yourAuthPath
+  %(prog)s http://localhost:8545
+  %(prog)s http://localhost:8745
+  %(prog)s -t 5 localhost:8545""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "rpc_url",
+        help="JSON-RPC endpoint (http:// is added if omitted)",
+    )
+    parser.add_argument(
+        "-t", "--timeout",
+        type=int,
+        default=10,
+        metavar="SECS",
+        help="RPC timeout in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Dump RPC requests and responses",
+    )
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+    return parser.parse_args()
 
-Environment:
-  CHECK_TIMEOUT  RPC timeout in seconds (default: 10)
 
-Options:
-  -h, --help     Show this help
-  -v, --verbose  Dump RPC requests and responses
-""")
-
-
-def parse_args() -> Optional[Tuple[str, bool]]:
-    if "-h" in sys.argv or "--help" in sys.argv:
-        print_help()
-        return None
-    verbose = "-v" in sys.argv or "--verbose" in sys.argv
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if not args:
-        print_help()
-        return None
-    return (args[0], verbose)
-
-
-_parsed = parse_args()
-if _parsed is None:
-    sys.exit(0)
-RPC_URL, VERBOSE = _parsed
-
-TIMEOUT = int(os.environ.get("CHECK_TIMEOUT", "10"))
+_args = parse_args()
+RPC_URL = _args.rpc_url
+VERBOSE = _args.verbose
+TIMEOUT = _args.timeout
+if not RPC_URL.startswith(("http://", "https://")):
+    RPC_URL = "http://" + RPC_URL
 
 
 def rpc(method: str, *params) -> Optional[dict]:
