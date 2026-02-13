@@ -434,7 +434,8 @@ def main() -> None:
     print(f"{CYAN}[4/4]{NC} Summary")
     print(f"{CYAN}=== Summary ==={NC}")
     eb = earliest_block or 1
-    print(f"Block range:          {eb} → {current_dec}")
+    block_count = current_dec - eb + 1
+    print(f"Block range:          {eb} → {current_dec} ({block_count:,} blocks)")
     if eb == 1:
         print(f"Block history:        {GREEN}✓ FULL (from genesis){NC}")
     else:
