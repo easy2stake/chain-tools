@@ -77,7 +77,10 @@ def rpc(method: str, *params) -> Optional[dict]:
         r.raise_for_status()
         data = r.json()
         if VERBOSE:
-            print(f"  {YELLOW}[RPC] ← {method}{NC} {json.dumps(data)}")
+            out = json.dumps(data)
+            if len(out) > 200:
+                out = out[:200] + "..."
+            print(f"  {YELLOW}[RPC] ← {method}{NC} {out}")
         return data.get("result")
     except Exception as e:
         if VERBOSE:
