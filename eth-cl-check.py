@@ -7,9 +7,13 @@ import json
 
 # Help menu if running empty or --help flag is provided
 if len(sys.argv) == 1 or "--help" in sys.argv:
-    print(f"""Usage: {sys.argv[0]} [BASE_URL] [--debug] [--help]
+    print(f"""Usage: {sys.argv[0]} <BASE_URL|FULL_URL> [--debug] [--help]
+       {sys.argv[0]} <VIP_ADDR> <VIP_PORT> <REAL_IP> <REAL_PORT> [--debug] [--help]
 
-BASE_URL: The base URL for the Ethereum node API.
+Modes:
+  Full URL:  $1 = full base URL (e.g. http://host:4000 or https://cl.example.com)
+  HAProxy:   $1,$2 = VIP address/port, $3 = Real Server IP, $4 = Real Server Port
+
 --debug:   Enable debug output.
 --help:    Display this help menu.
 """)
@@ -17,19 +21,21 @@ BASE_URL: The base URL for the Ethereum node API.
 
 # Configuration
 if len(sys.argv) < 2 or sys.argv[1].startswith("--"):
-    print("Error: BASE_URL must be provided.")
+    print("Error: BASE_URL / FULL_URL or (VIP, port, real IP, real port) must be provided.")
     sys.exit(1)
 
-# Variables passed by ldirectord/haproxy.
-# sys.argv[1] = VIP Address
-# sys.argv[2] = VIP Port
-# sys.argv[3] = Real Server IP
-# sys.argv[4] = Real Server Port
-
-# Reassigning to named variables
-server = sys.argv[3]
-port = sys.argv[4]
-BASE_URL=f"http://{server}:{port}"
+# Mode: $1 is full URL (http:// or https://) -> use it as BASE_URL
+# Mode: ldirectord/haproxy pass VIP in $1,$2 and real server in $3,$4
+arg1 = sys.argv[1]
+if arg1.startswith("http://") or arg1.startswith("https://"):
+    BASE_URL = arg1.rstrip("/")
+else:
+    if len(sys.argv) < 5:
+        print("Error: Either provide a full URL as $1, or $3 (Real Server IP) and $4 (Real Server Port).")
+        sys.exit(1)
+    server = sys.argv[3]
+    port = sys.argv[4]
+    BASE_URL = f"http://{server}:{port}"
 DEBUG = "--debug" in sys.argv
 GENESIS_TIME = 1606824023  # Ethereum mainnet genesis time
 script_name = sys.argv[0].split('/')[-1]
