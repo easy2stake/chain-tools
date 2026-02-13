@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 #
 # Fast block history and tx indexer checker for Bor/Polygon nodes.
-# Python equivalent with threaded sampling for speed.
+# Uses binary search to find block history, tx indexer, and archival boundaries.
 
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple
 
 try:
@@ -28,8 +27,23 @@ def print_help() -> None:
     print(f"""Usage: {script} RPC_URL
 
 Fast block history, tx indexer, and archival state checker for Bor/Polygon nodes.
-Uses binary search + threaded sampling to minimize round trips.
+Uses binary search to minimize RPC round trips.
 Tests: block history, tx index (eth_getTransactionByHash), archival state (eth_getBalance).
+
+Flow:
+  [1] Get current block (eth_blockNumber)
+       |
+       v
+  [2] Binary search: earliest block (eth_getBlockByNumber)
+       |
+       v
+  [3] Binary search: tx indexer boundary (eth_getTransactionByHash)
+       |
+       v
+  [4] Binary search: archival boundary (eth_getBalance at historical block)
+       |
+       v
+  Summary
 
 Arguments:
   RPC_URL    JSON-RPC endpoint (required)
@@ -43,45 +57,27 @@ Environment:
   CHECK_TIMEOUT  RPC timeout in seconds (default: 10)
 
 Options:
-  -h, --help        Show this help
-  -v, --verbose     Dump RPC requests and responses
-  --increments N    Step (decrement) when sampling backwards over the "past ~200k blocks" range.
-                    N must be > 1000. Use on forked chains where genesis is not block 1.
+  -h, --help     Show this help
+  -v, --verbose  Dump RPC requests and responses
 """)
 
 
-def parse_args() -> Optional[Tuple[str, bool, Optional[int]]]:
+def parse_args() -> Optional[Tuple[str, bool]]:
     if "-h" in sys.argv or "--help" in sys.argv:
         print_help()
         return None
     verbose = "-v" in sys.argv or "--verbose" in sys.argv
-    argv = sys.argv[1:]
-    decrement: Optional[int] = None
-    if "--increments" in argv:
-        idx = argv.index("--increments")
-        if idx + 1 >= len(argv):
-            print("Error: --increments requires a value (e.g. --increments 50000)", file=sys.stderr)
-            sys.exit(1)
-        try:
-            decrement = int(argv[idx + 1])
-        except ValueError:
-            print("Error: --increments value must be an integer", file=sys.stderr)
-            sys.exit(1)
-        if decrement <= 1000:
-            print("Error: --increments value must be greater than 1000", file=sys.stderr)
-            sys.exit(1)
-        argv = argv[:idx] + argv[idx + 2:]
-    args = [a for a in argv if not a.startswith("-")]
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if not args:
         print_help()
         return None
-    return (args[0], verbose, decrement)
+    return (args[0], verbose)
 
 
 _parsed = parse_args()
 if _parsed is None:
     sys.exit(0)
-RPC_URL, VERBOSE, DECREMENT = _parsed
+RPC_URL, VERBOSE = _parsed
 
 TIMEOUT = int(os.environ.get("CHECK_TIMEOUT", "10"))
 
@@ -166,20 +162,6 @@ def get_tx_from_block_or_nearby(
     return None
 
 
-def sample_one(
-    s: int, earliest_block: int, current_dec: int
-) -> tuple[int, str | tuple[int, int] | tuple[int, str], Optional[tuple[int, int]]]:
-    """Returns (sample, 'skipped', None) if out of range; (sample, 'no_tx', (low, high)) if no tx; (sample, (blk, h), None) if found."""
-    if s > current_dec or s < earliest_block:
-        return (s, "skipped", None)
-    result = get_tx_from_block_or_nearby(s, 50, current_dec)
-    if result is None:
-        low = max(1, s - 50)
-        high = min(current_dec, s + 50)
-        return (s, "no_tx", (low, high))
-    return (s, result, None)
-
-
 def main() -> None:
     print(f"{CYAN}=== Block History & Tx Indexer Check ==={NC}")
     print(f"RPC: {RPC_URL}")
@@ -197,6 +179,7 @@ def main() -> None:
 
     # 2. Binary search for earliest available block
     print(f"{CYAN}[2/4]{NC} Checking block history (binary search)...")
+    print("      Info: Binary search over block range; may issue many eth_getBlockByNumber calls for large chains.")
     low, high = 1, current_dec
     iterations = 0
     earliest_block = 1
@@ -254,42 +237,11 @@ def main() -> None:
 
     # 3. Tx indexer + archival check
     print(f"{CYAN}[3/4]{NC} Checking tx indexer and archival state (binary search)...")
+    print("      Info: Running tx indexer and archival binary searches; may issue many RPC calls for large chains.")
     tx_iterations = 0
     tx_indexer_earliest = "N/A"
     archival_earliest = "N/A"
-    archival_working = current_dec
-    archival_failing = earliest_block
     archival_tested = False
-
-    # Floor: don't sample below chain genesis (e.g. forked chains where first block > 1)
-    floor = earliest_block
-    # Derive samples from current block inwards towards genesis (halving each step)
-    samples = []
-    b = current_dec
-    while b >= floor:
-        samples.append(int(b))
-        if len(samples) >= 12:
-            break
-        b = b // 2
-    if floor not in samples:
-        samples.append(floor)
-    # Past ~200k blocks: fixed 10000 decrement, or --increments N (N > 1000) when provided
-    step = (DECREMENT if DECREMENT is not None else 10000)
-    for i in range(21):
-        b = current_dec - i * step
-        if b >= floor:
-            samples.append(b)
-    # Always include past 1000 blocks in 100 decrements
-    for i in range(11):
-        b = current_dec - i * 100
-        if b >= floor:
-            samples.append(b)
-    # Always include past 130 blocks in 10 decrements
-    for i in range(14):
-        b = current_dec - i * 10
-        if b >= floor:
-            samples.append(b)
-    samples = sorted(set(samples))
 
     recent_result = get_tx_from_block_or_nearby(current_dec, 500, current_dec)
     tx_iterations += 1
@@ -310,141 +262,62 @@ def main() -> None:
                 archival_tested = True
                 ar_icon = f"{GREEN}✓{NC}" if ar else f"{RED}✗{NC}"
                 print(f"        {ar_icon} archival: [eth_getBalance({from_addr}, {recent_block})]")
-            tx_working = current_dec
-            tx_failing = earliest_block
 
-            # Threaded sampling
-            print("      Sampling blocks to find tx indexer / archival boundary (parallel)...")
-            sample_results: list[
-                tuple[int, str | tuple[int, int] | tuple[int, str], tuple[int, int] | None]
-            ] = []
-
-            max_workers = min(8, len(samples))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(sample_one, s, earliest_block, current_dec): s
-                    for s in samples
-                }
-                for future in as_completed(futures):
-                    s = futures[future]
-                    try:
-                        sample, status, extra = future.result()
-                        tx_iterations += 1
-                        if status == "skipped":
-                            sample_results.append((sample, "skipped", None))
-                        elif status == "no_tx":
-                            sample_results.append((sample, "no_tx", extra))
-                        else:
-                            sample_results.append((sample, status, None))
-                    except Exception as e:
-                        sample_results.append((s, ("error", str(e)), None))
-
-            # Sort by sample and print in order; stop at first tx indexer failure
-            sample_results.sort(key=lambda x: x[0])
-            for sample, status, extra in sample_results:
-                if status == "skipped":
-                    print(f"        Sample {sample}: skipped (out of block range)")
-                elif status == "no_tx":
-                    low, high = extra
-                    print(
-                        f"        Sample {sample}: no block with txs in range (blocks {low}..{high})"
-                    )
-                elif isinstance(status, tuple) and len(status) == 2 and isinstance(status[0], int):
-                    blk, h = status
+            # Tx indexer binary search from earliest_block to current_dec
+            low, high = earliest_block, current_dec
+            while low < high:
+                mid = (low + high) // 2
+                result = get_tx_from_block_or_nearby(mid, 20, current_dec)
+                tx_iterations += 1
+                if result is not None:
+                    blk, h = result
                     tx_iterations += 1
                     tx_obj = get_tx_by_hash(h)
-                    indexed = tx_obj is not None
-                    if indexed:
-                        archival_ok = None
-                        from_addr = tx_obj.get("from") if tx_obj else None
-                        if tx_obj and from_addr:
-                            tx_iterations += 1
-                            archival_ok = archival_balance_works(from_addr, blk)
-                            archival_tested = True
-                            if archival_ok:
-                                archival_working = min(archival_working, blk)
-                            else:
-                                archival_failing = blk
-                        print(f"        Sample {sample}: blk {blk}")
-                        print(f"            tx: {h} → {GREEN}✓ indexed{NC}")
-                        if archival_ok is not None:
-                            ar_icon = f"{GREEN}✓{NC}" if archival_ok else f"{RED}✗{NC}"
-                            print(f"            {ar_icon} archival: [eth_getBalance({from_addr}, {blk})]")
-                        if blk < tx_working:
-                            tx_working = blk
-                    else:
-                        print(f"        Sample {sample}: blk {blk}")
-                        print(f"            tx: {h} → {RED}✗ not indexed{NC}")
-                        tx_failing = blk
-                        break
-                elif isinstance(status, tuple) and status[0] == "error":
-                    print(f"        Sample {sample}: error - {status[1]}")
-
-            # Binary search between tx_working and tx_failing
-            if tx_failing > tx_working:
-                print(
-                    f"      Binary search between block {tx_working} (✓) and {tx_failing} (✗)..."
-                )
-                low, high = tx_working, tx_failing
-                while low < high:
-                    mid = (low + high) // 2
-                    result = get_tx_from_block_or_nearby(mid, 20, current_dec)
-                    tx_iterations += 1
-                    if result is not None:
-                        blk, h = result
-                        tx_iterations += 1
-                        tx_obj = get_tx_by_hash(h)
-                        if tx_obj is not None:
-                            high = mid
-                        else:
-                            low = mid + 1
+                    if tx_obj is not None:
+                        high = mid
                     else:
                         low = mid + 1
-                tx_indexer_earliest = low
-                print(f"      {YELLOW}Tx indexer available from block ~{tx_indexer_earliest}{NC}")
-            elif tx_working == 1 or (earliest_block == 1 and tx_working <= 1000):
+                else:
+                    low = mid + 1
+            tx_indexer_earliest = low
+            if tx_indexer_earliest == 1 or (earliest_block == 1 and tx_indexer_earliest <= 1000):
                 tx_indexer_earliest = 1
                 print(
                     f"      {GREEN}✓ Full tx index from block 1 (eth_getTransactionByHash works for entire chain){NC}"
                 )
             else:
-                tx_indexer_earliest = tx_working
-                print(f"      {GREEN}Tx indexer available from block ~{tx_indexer_earliest}{NC}")
+                print(f"      {YELLOW}Tx indexer available from block ~{tx_indexer_earliest}{NC}")
 
-            # Archival binary search (if we found a boundary)
-            if archival_tested and archival_failing > archival_working:
-                print(
-                    f"      Binary search for archival boundary (block {archival_working} ✓ vs {archival_failing} ✗)..."
-                )
-                low, high = archival_working, archival_failing
-                while low < high:
-                    mid = (low + high) // 2
-                    result = get_tx_from_block_or_nearby(mid, 20, current_dec)
+            # Archival binary search from earliest_block to current_dec
+            archival_tested = True
+            low, high = earliest_block, current_dec
+            while low < high:
+                mid = (low + high) // 2
+                result = get_tx_from_block_or_nearby(mid, 20, current_dec)
+                tx_iterations += 1
+                if result is not None:
+                    blk, h = result
+                    tx_obj = get_tx_by_hash(h)
                     tx_iterations += 1
-                    if result is not None:
-                        blk, h = result
-                        tx_obj = get_tx_by_hash(h)
+                    from_addr = tx_obj.get("from") if tx_obj else None
+                    if from_addr:
                         tx_iterations += 1
-                        if tx_obj and tx_obj.get("from"):
-                            tx_iterations += 1
-                            if archival_balance_works(tx_obj["from"], blk):
-                                high = mid
-                            else:
-                                low = mid + 1
+                        if archival_balance_works(from_addr, blk):
+                            high = mid
                         else:
                             low = mid + 1
                     else:
                         low = mid + 1
-                archival_earliest = low
-                print(f"      {YELLOW}Archival state (eth_getBalance) available from block ~{archival_earliest}{NC}")
-            elif archival_tested and (archival_working == 1 or (earliest_block == 1 and archival_working <= 1000)):
+                else:
+                    low = mid + 1
+            archival_earliest = low
+            if archival_earliest == 1 or (earliest_block == 1 and archival_earliest <= 1000):
                 archival_earliest = 1
                 print(
                     f"      {GREEN}✓ Full archival state from block 1 (eth_getBalance works for entire chain){NC}"
                 )
-            elif archival_tested and archival_failing <= archival_working:
-                archival_earliest = archival_working
-                print(f"      {GREEN}Archival state available from block ~{archival_earliest}{NC}")
+            else:
+                print(f"      {YELLOW}Archival state (eth_getBalance) available from block ~{archival_earliest}{NC}")
         else:
             print(f"      Block {recent_block}, tx {recent_tx} → {RED}✗ lookup failed{NC}")
 
