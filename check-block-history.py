@@ -76,13 +76,9 @@ def rpc(method: str, *params) -> Optional[dict]:
         r = requests.post(RPC_URL, json=payload, timeout=TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        result = data.get("result")
         if VERBOSE:
-            out = json.dumps(result)
-            if len(out) > 500:
-                out = out[:500] + "..."
-            print(f"  {YELLOW}[RPC] ← {method}{NC} {out}")
-        return result
+            print(f"  {YELLOW}[RPC] ← {method}{NC} {json.dumps(data)}")
+        return data.get("result")
     except Exception as e:
         if VERBOSE:
             print(f"  {RED}[RPC] ✗ {method}{NC} {e}")
