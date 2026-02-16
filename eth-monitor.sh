@@ -18,6 +18,8 @@ DRY_RUN="${DRY_RUN:-false}"
 # Telegram configuration
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+TELEGRAM_COOLDOWN_RATE_MINUTES="${TELEGRAM_COOLDOWN_RATE_MINUTES:-5}"  # max one "restart skipped (cooldown)" Telegram per N minutes
+declare -A TELEGRAM_RATE_LAST_SEND  # key -> last send timestamp for rate limiting
 
 # Track last restart time to prevent too frequent restarts
 LAST_RESTART_TIME=0
@@ -63,6 +65,7 @@ Environment Variables:
   DRY_RUN                 Dry run mode flag (true/false)
   TELEGRAM_BOT_TOKEN      Bot token for Telegram notifications (optional)
   TELEGRAM_CHAT_ID        Chat ID for Telegram notifications (optional)
+  TELEGRAM_COOLDOWN_RATE_MINUTES  Max one \"restart skipped (cooldown)\" Telegram per N minutes (default: 5)
 
 Examples:
   $0
@@ -96,12 +99,25 @@ log() {
 }
 
 # Function to send a message to Telegram chat.
-# Returns 0 on success, 1 if not configured or on failure.
+# Optional: send_telegram_message "text" [rate_limit_seconds] [rate_limit_id]
+# When rate_limit_* are set, at most one message per rate_limit_id is sent every rate_limit_seconds (avoids spam).
+# Returns 0 on success or when skipped by rate limit, 1 if not configured or on failure.
 send_telegram_message() {
   local message="$1"
+  local rate_limit_seconds="${2:-}"
+  local rate_limit_id="${3:-}"
   local url
   local payload
   local response
+
+  if [ -n "$rate_limit_seconds" ] && [ -n "$rate_limit_id" ]; then
+    local now
+    now=$(date +%s)
+    local last="${TELEGRAM_RATE_LAST_SEND[$rate_limit_id]:-0}"
+    if [ $((now - last)) -lt "$rate_limit_seconds" ]; then
+      return 0
+    fi
+  fi
 
   if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
     log "WARN: Telegram not configured. TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing."
@@ -138,6 +154,9 @@ send_telegram_message() {
     return 1
   fi
 
+  if [ -n "$rate_limit_seconds" ] && [ -n "$rate_limit_id" ]; then
+    TELEGRAM_RATE_LAST_SEND[$rate_limit_id]=$(date +%s)
+  fi
   return 0
 }
 
@@ -368,14 +387,7 @@ restart_docker_container() {
   
   if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
     log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
-    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Container: ${container_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)."
-    return 1
-  fi
-  
-  # Check if container exists
-  if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
-    log "ERROR: Docker container '${container_name}' not found"
-    send_telegram_message "❌ <b>eth-monitor</b>: Docker container '${container_name}' not found. Cannot restart."
+    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Container: ${container_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)." $((TELEGRAM_COOLDOWN_RATE_MINUTES * 60)) "cooldown_skip"
     return 1
   fi
   
@@ -420,13 +432,7 @@ restart_systemd_service() {
 
   if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
     log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
-    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Service: ${service_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)."
-    return 1
-  fi
-
-  if ! systemctl show "$service_name" &>/dev/null; then
-    log "ERROR: Systemd service '${service_name}' not found"
-    send_telegram_message "❌ <b>eth-monitor</b>: Systemd service '${service_name}' not found. Cannot restart."
+    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Service: ${service_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)." $((TELEGRAM_COOLDOWN_RATE_MINUTES * 60)) "cooldown_skip"
     return 1
   fi
 
