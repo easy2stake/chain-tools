@@ -43,6 +43,8 @@ Options:
   --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
   --service-log-lines <n> Number of journal lines to capture for service before restart (default: 5000)
   --host-service-log-dest <path> Destination for service journal dumps (default: ./log/service-logs)
+  --telegram-token <token>  Telegram bot token (optional)
+  --telegram-chat-id <id>  Telegram chat ID (optional)
 
 Environment Variables:
   RPC_URL                 RPC endpoint URL
@@ -73,6 +75,7 @@ Examples:
   $0 -c reth-node --container-logs /var/log/reth --host-log-dest ./logs
   $0 -s reth --threshold 120  # Systemd service
   $0 -s reth --service-log-lines 10000
+  $0 -c reth-node --telegram-token 123:ABC --telegram-chat-id -1001234567890
 
 EOF
   exit 0
@@ -672,6 +675,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --host-service-log-dest)
       HOST_SERVICE_LOG_DEST="$2"
+      shift 2
+      ;;
+    --telegram-token)
+      TELEGRAM_BOT_TOKEN="$2"
+      shift 2
+      ;;
+    --telegram-chat-id)
+      TELEGRAM_CHAT_ID="$2"
       shift 2
       ;;
     *)
