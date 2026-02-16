@@ -3,13 +3,16 @@
 # Environment Variables (with defaults)
 RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-10}"
-BLOCK_LAG_THRESHOLD="${BLOCK_LAG_THRESHOLD:-60}"
+BLOCK_LAG_THRESHOLD="${BLOCK_LAG_THRESHOLD:-120}"
 TIMEOUT="${TIMEOUT:-2}"
 VERBOSE="${VERBOSE:-false}"
 LOG_FILE="${LOG_FILE:-$(dirname "$0")/log/eth-monitor.log}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
 CONTAINER_LOG_FOLDER="${CONTAINER_LOG_FOLDER:-}"
 HOST_LOG_DEST="${HOST_LOG_DEST:-$(dirname "$0")/log/container-logs}"
+SERVICE_NAME="${SERVICE_NAME:-}"
+SERVICE_LOG_LINES="${SERVICE_LOG_LINES:-5000}"
+HOST_SERVICE_LOG_DEST="${HOST_SERVICE_LOG_DEST:-$(dirname "$0")/log/service-logs}"
 DRY_RUN="${DRY_RUN:-false}"
 
 # Telegram configuration
@@ -33,21 +36,27 @@ Options:
   -u, --url <url>         Override RPC_URL (default: $RPC_URL)
   -i, --interval <seconds> Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
   -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
-  -l, --log-file <path>   Override LOG_FILE (default: log/eth-monitor.log, or log/<container>.log if -c set)
-  -c, --container <name>  Docker container name to restart when threshold exceeded
+  -l, --log-file <path>   Override LOG_FILE (default: log/eth-monitor.log, or log/<name>.log if -c/-s set)
+  -c, --container <name>  Docker container name to restart when threshold exceeded (mutually exclusive with -s)
+  -s, --service <name>    Systemd service name to restart when threshold exceeded (mutually exclusive with -c)
   --container-logs <path> Path to log folder inside container to copy to host
   --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
+  --service-log-lines <n> Number of journal lines to capture for service before restart (default: 5000)
+  --host-service-log-dest <path> Destination for service journal dumps (default: ./log/service-logs)
 
 Environment Variables:
-  RPC_URL                RPC endpoint URL
+  RPC_URL                 RPC endpoint URL
   MONITOR_INTERVAL        Seconds between checks
   BLOCK_LAG_THRESHOLD     Max allowed lag in seconds
   TIMEOUT                 Request timeout in seconds
   VERBOSE                 Verbose output flag (true/false)
   LOG_FILE                Path to log file
-  DOCKER_CONTAINER        Docker container name to restart when threshold exceeded
+  DOCKER_CONTAINER        Docker container name to restart when threshold exceeded (mutually exclusive with SERVICE_NAME)
   CONTAINER_LOG_FOLDER    Path to log folder inside container to copy to host
   HOST_LOG_DEST           Destination folder on host for copied container logs
+  SERVICE_NAME            Systemd service name to restart when threshold exceeded (mutually exclusive with DOCKER_CONTAINER)
+  SERVICE_LOG_LINES       Journal lines to capture before service restart (default: 5000)
+  HOST_SERVICE_LOG_DEST   Destination for service journal dumps (default: ./log/service-logs)
   RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
   DRY_RUN                 Dry run mode flag (true/false)
   TELEGRAM_BOT_TOKEN      Bot token for Telegram notifications (optional)
@@ -62,6 +71,8 @@ Examples:
   $0 -c reth-node --threshold 120
   $0 -c reth-node --dry-run  # Test without actually restarting
   $0 -c reth-node --container-logs /var/log/reth --host-log-dest ./logs
+  $0 -s reth --threshold 120  # Systemd service
+  $0 -s reth --service-log-lines 10000
 
 EOF
   exit 0
@@ -237,9 +248,11 @@ check_block_lag() {
     status="ERROR"
   fi
   
-  # Log the status (include container name column if provided)
+  # Log the status (include container or service column if provided)
   if [ -n "$DOCKER_CONTAINER" ]; then
     log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Container: ${DOCKER_CONTAINER}"
+  elif [ -n "$SERVICE_NAME" ]; then
+    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Service: ${SERVICE_NAME}"
   else
     log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status}"
   fi
@@ -292,6 +305,39 @@ copy_container_logs() {
     return 0
   else
     log "WARN: Failed to copy logs from container '${container_name}' (container may be stopped or path doesn't exist)"
+    return 1
+  fi
+}
+
+# Function to copy systemd service journal to host before restart
+copy_service_logs() {
+  local service_name="$1"
+  local host_dest="$2"
+  local lines="${SERVICE_LOG_LINES:-5000}"
+
+  if [ -z "$service_name" ]; then
+    return 0
+  fi
+
+  mkdir -p "$host_dest"
+  local timestamp=$(date '+%Y%m%d_%H%M%S')
+  local dest_file="${host_dest}/${service_name}_${timestamp}.journal.log"
+
+  if ! systemctl show "$service_name" &>/dev/null; then
+    log "WARN: Systemd service '${service_name}' not found, skipping journal copy"
+    return 1
+  fi
+
+  log "Copying journal for ${service_name} (last ${lines} lines) to ${dest_file}"
+  if journalctl -u "$service_name" -n "$lines" --no-pager > "$dest_file" 2>/dev/null; then
+    if [ "$DRY_RUN" == "true" ]; then
+      log "[DRY RUN] Successfully copied service journal to ${dest_file}"
+    else
+      log "Successfully copied service journal to ${dest_file}"
+    fi
+    return 0
+  else
+    log "WARN: Failed to copy journal for service '${service_name}'"
     return 1
   fi
 }
@@ -349,6 +395,53 @@ restart_docker_container() {
   fi
 }
 
+# Function to restart systemd service
+restart_systemd_service() {
+  local service_name="$1"
+
+  if [ -z "$service_name" ]; then
+    log "WARN: Systemd service name not provided, skipping restart"
+    return 1
+  fi
+
+  local current_time=$(date +%s)
+  local time_since_restart=$((current_time - LAST_RESTART_TIME))
+
+  if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
+    log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
+    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Service: ${service_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)."
+    return 1
+  fi
+
+  if ! systemctl show "$service_name" &>/dev/null; then
+    log "ERROR: Systemd service '${service_name}' not found"
+    send_telegram_message "❌ <b>eth-monitor</b>: Systemd service '${service_name}' not found. Cannot restart."
+    return 1
+  fi
+
+  copy_service_logs "$service_name" "$HOST_SERVICE_LOG_DEST"
+
+  if [ "$DRY_RUN" == "true" ]; then
+    log "[DRY RUN] Would restart systemd service: ${service_name}"
+    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart service: ${service_name} (block lag exceeded on $RPC_URL)"
+    LAST_RESTART_TIME=$current_time
+    return 0
+  else
+    log "Restarting systemd service: ${service_name}"
+    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting service: ${service_name} (block lag exceeded on $RPC_URL)"
+    if systemctl restart "$service_name" 2>/dev/null; then
+      LAST_RESTART_TIME=$current_time
+      log "Successfully restarted systemd service: ${service_name}"
+      send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted service: ${service_name}"
+      return 0
+    else
+      log "ERROR: Failed to restart systemd service: ${service_name}"
+      send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart service: ${service_name}"
+      return 1
+    fi
+  fi
+}
+
 # Function to validate RPC endpoint
 validate_endpoint() {
   local response
@@ -394,7 +487,7 @@ monitor_loop() {
   log "Starting continuous monitoring (interval: ${MONITOR_INTERVAL}s, threshold: ${BLOCK_LAG_THRESHOLD}s)"
   log "Log file: $LOG_FILE"
   if [ "$DRY_RUN" == "true" ]; then
-    log "DRY RUN MODE: Container restarts will be simulated only"
+    log "DRY RUN MODE: Container/service restarts will be simulated only"
   fi
   if [ -n "$DOCKER_CONTAINER" ]; then
     if [ "$DRY_RUN" == "true" ]; then
@@ -405,6 +498,14 @@ monitor_loop() {
     if [ -n "$CONTAINER_LOG_FOLDER" ]; then
       log "Container log copying enabled: ${CONTAINER_LOG_FOLDER} -> ${HOST_LOG_DEST}"
     fi
+  fi
+  if [ -n "$SERVICE_NAME" ]; then
+    if [ "$DRY_RUN" == "true" ]; then
+      log "Systemd service restart enabled (DRY RUN): ${SERVICE_NAME} (cooldown: ${RESTART_COOLDOWN}s)"
+    else
+      log "Systemd service restart enabled: ${SERVICE_NAME} (cooldown: ${RESTART_COOLDOWN}s)"
+    fi
+    log "Service journal capture: last ${SERVICE_LOG_LINES} lines -> ${HOST_SERVICE_LOG_DEST}"
   fi
   
   # Set up signal handlers
@@ -419,11 +520,16 @@ monitor_loop() {
       check_block_lag "$block_data"
       local lag_status=$?
       
-      # Restart container if threshold exceeded (ERROR status)
+      # Restart container or service if threshold exceeded (ERROR status)
       if [ $lag_status -eq 1 ]; then
-        send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL${DOCKER_CONTAINER:+ | Container: $DOCKER_CONTAINER}"
         if [ -n "$DOCKER_CONTAINER" ]; then
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Container: $DOCKER_CONTAINER"
           restart_docker_container "$DOCKER_CONTAINER"
+        elif [ -n "$SERVICE_NAME" ]; then
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Service: $SERVICE_NAME"
+          restart_systemd_service "$SERVICE_NAME"
+        else
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL"
         fi
       fi
     else
@@ -471,12 +577,24 @@ while [[ $# -gt 0 ]]; do
       DOCKER_CONTAINER="$2"
       shift 2
       ;;
+    -s|--service)
+      SERVICE_NAME="$2"
+      shift 2
+      ;;
     --container-logs)
       CONTAINER_LOG_FOLDER="$2"
       shift 2
       ;;
     --host-log-dest)
       HOST_LOG_DEST="$2"
+      shift 2
+      ;;
+    --service-log-lines)
+      SERVICE_LOG_LINES="$2"
+      shift 2
+      ;;
+    --host-service-log-dest)
+      HOST_SERVICE_LOG_DEST="$2"
       shift 2
       ;;
     *)
@@ -486,10 +604,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# When using a container and log file was not explicitly set, use log/container-name.log
+# Docker container and systemd service are mutually exclusive
+if [ -n "$DOCKER_CONTAINER" ] && [ -n "$SERVICE_NAME" ]; then
+  echo "ERROR: DOCKER_CONTAINER and SERVICE_NAME are mutually exclusive. Set only one of -c/--container or -s/--service."
+  exit 1
+fi
+
+# When using a container or service and log file was not explicitly set, use log/<name>.log
 default_log_file="$(dirname "$0")/log/eth-monitor.log"
 if [ -n "$DOCKER_CONTAINER" ] && [ "$LOG_FILE" = "$default_log_file" ]; then
   LOG_FILE="$(dirname "$0")/log/${DOCKER_CONTAINER}.log"
+elif [ -n "$SERVICE_NAME" ] && [ "$LOG_FILE" = "$default_log_file" ]; then
+  LOG_FILE="$(dirname "$0")/log/${SERVICE_NAME}.log"
 fi
 
 # Check if jq is available
@@ -502,6 +628,28 @@ fi
 if [ -n "$DOCKER_CONTAINER" ] && ! command -v docker >/dev/null 2>&1; then
   echo "ERROR: docker is required but not installed. Please install docker to use container restart feature."
   exit 1
+fi
+
+# Check if systemctl is available (if service name is provided)
+if [ -n "$SERVICE_NAME" ] && ! command -v systemctl >/dev/null 2>&1; then
+  echo "ERROR: systemctl is required but not available. Please run with a systemd system to use service restart feature."
+  exit 1
+fi
+
+# Validate container exists (if container name is provided)
+if [ -n "$DOCKER_CONTAINER" ]; then
+  if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${DOCKER_CONTAINER}$"; then
+    echo "ERROR: Docker container '${DOCKER_CONTAINER}' not found. List containers with: docker ps -a"
+    exit 1
+  fi
+fi
+
+# Validate systemd service exists (if service name is provided)
+if [ -n "$SERVICE_NAME" ]; then
+  if ! systemctl show "$SERVICE_NAME" &>/dev/null; then
+    echo "ERROR: Systemd service '${SERVICE_NAME}' not found. List units with: systemctl list-units -t service"
+    exit 1
+  fi
 fi
 
 # Validate endpoint before starting
