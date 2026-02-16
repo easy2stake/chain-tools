@@ -582,10 +582,10 @@ send_telegram_startup() {
   [ -n "$SERVICE_NAME" ] && target="Service: ${SERVICE_NAME}"
 
   local dry=""
-  [ "$DRY_RUN" == "true" ] && dry="\n<b>DRY RUN</b>"
+  [ "$DRY_RUN" == "true" ] && dry=$'\n<b>DRY RUN</b>'
 
   local chain_line=""
-  [ -n "$CHAIN_ID" ] && chain_line="\n<b>Chain ID:</b> ${CHAIN_ID}${CHAIN_SHORT_NAME:+ (${CHAIN_SHORT_NAME})}"
+  [ -n "$CHAIN_ID" ] && chain_line=$'\n<b>Chain ID:</b> '"${CHAIN_ID}${CHAIN_SHORT_NAME:+ (${CHAIN_SHORT_NAME})}"
 
   local msg="🟢 <b>eth-monitor started</b>${dry}
 <b>RPC:</b> ${RPC_URL}${chain_line}
