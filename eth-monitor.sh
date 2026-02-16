@@ -527,6 +527,35 @@ cleanup() {
   exit 0
 }
 
+# Send structured startup info to Telegram when a new instance starts
+send_telegram_startup() {
+  local holdoff_status="—"
+  if [ -n "$DOCKER_CONTAINER" ] || [ -n "$SERVICE_NAME" ]; then
+    local current_time=$(date +%s)
+    local time_since_restart=$((current_time - LAST_RESTART_TIME))
+    if [ "$LAST_RESTART_TIME" -gt 0 ] && [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
+      holdoff_status="active (${time_since_restart}s since restart)"
+    else
+      holdoff_status="inactive"
+    fi
+  fi
+
+  local target="—"
+  [ -n "$DOCKER_CONTAINER" ] && target="Container: ${DOCKER_CONTAINER}"
+  [ -n "$SERVICE_NAME" ] && target="Service: ${SERVICE_NAME}"
+
+  local dry=""
+  [ "$DRY_RUN" == "true" ] && dry="\n<b>DRY RUN</b>"
+
+  local msg="🟢 <b>eth-monitor started</b>${dry}
+<b>RPC:</b> ${RPC_URL}
+<b>Interval:</b> ${MONITOR_INTERVAL}s · <b>Threshold:</b> ${BLOCK_LAG_THRESHOLD}s
+<b>Target:</b> ${target}
+<b>Cooldown:</b> ${RESTART_COOLDOWN}s · <b>Holdoff:</b> ${holdoff_status}
+<b>Log:</b> ${LOG_FILE}"
+  send_telegram_message "$msg"
+}
+
 # Main monitoring loop
 monitor_loop() {
   local block_data
@@ -724,6 +753,9 @@ fi
 if ! validate_endpoint; then
   exit 1
 fi
+
+# Notify Telegram of new instance startup (structured minimal info)
+send_telegram_startup
 
 # Start monitoring
 monitor_loop
