@@ -248,11 +248,19 @@ check_block_lag() {
     status="ERROR"
   fi
   
-  # Log the status (include container or service column if provided)
+  # Holdoff remaining (when container/service is used)
+  local holdoff_remaining=0
+  if [ -n "$DOCKER_CONTAINER" ] || [ -n "$SERVICE_NAME" ]; then
+    local time_since_restart=$((current_time - LAST_RESTART_TIME))
+    holdoff_remaining=$((RESTART_COOLDOWN - time_since_restart))
+    [ "$holdoff_remaining" -lt 0 ] && holdoff_remaining=0
+  fi
+  
+  # Log the status (include container or service and holdoff remaining if provided)
   if [ -n "$DOCKER_CONTAINER" ]; then
-    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Container: ${DOCKER_CONTAINER}"
+    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Container: ${DOCKER_CONTAINER} | Holdoff remaining: ${holdoff_remaining}s"
   elif [ -n "$SERVICE_NAME" ]; then
-    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Service: ${SERVICE_NAME}"
+    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Service: ${SERVICE_NAME} | Holdoff remaining: ${holdoff_remaining}s"
   else
     log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status}"
   fi
