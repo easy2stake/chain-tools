@@ -442,6 +442,45 @@ restart_systemd_service() {
   fi
 }
 
+# Sync LAST_RESTART_TIME from container/service start time (Linux).
+# When running in the loop, detects external restarts (start time > our recorded + 10s),
+# updates cooldown state, and logs + sends Telegram.
+sync_restart_time_from_target() {
+  local current_started_at=0
+  local target_name=""
+  local target_type=""
+
+  if [ -n "$DOCKER_CONTAINER" ]; then
+    target_type="container"
+    target_name="$DOCKER_CONTAINER"
+    local started_at
+    started_at=$(docker inspect --format '{{.State.StartedAt}}' "$DOCKER_CONTAINER" 2>/dev/null)
+    if [ -n "$started_at" ] && [[ "$started_at" != "0001-01-01"* ]]; then
+      current_started_at=$(date -d "$started_at" +%s 2>/dev/null)
+    fi
+  elif [ -n "$SERVICE_NAME" ]; then
+    target_type="service"
+    target_name="$SERVICE_NAME"
+    local ts
+    ts=$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE_NAME" 2>/dev/null)
+    if [ -n "$ts" ] && [ "$ts" != "n/a" ]; then
+      current_started_at=$(date -d "$ts" +%s 2>/dev/null)
+    fi
+  else
+    return 0
+  fi
+
+  [ -z "$current_started_at" ] || [ "$current_started_at" -le 0 ] && return 0
+
+  if [ "$current_started_at" -gt "$((LAST_RESTART_TIME + 10))" ] && [ "$LAST_RESTART_TIME" -gt 0 ]; then
+    LAST_RESTART_TIME=$current_started_at
+    log "Detected external restart of ${target_type} '${target_name}'. Cooldown applied (${RESTART_COOLDOWN}s)."
+    send_telegram_message "🔄 <b>eth-monitor</b>: Detected external restart of ${target_type} <b>${target_name}</b>. Cooldown applied (${RESTART_COOLDOWN}s)."
+  elif [ "$current_started_at" -gt "$LAST_RESTART_TIME" ]; then
+    LAST_RESTART_TIME=$current_started_at
+  fi
+}
+
 # Function to validate RPC endpoint
 validate_endpoint() {
   local response
@@ -512,6 +551,7 @@ monitor_loop() {
   trap cleanup SIGINT SIGTERM
   
   while true; do
+    sync_restart_time_from_target
     # Get latest block
     block_data=$(get_latest_block)
     
@@ -651,6 +691,9 @@ if [ -n "$SERVICE_NAME" ]; then
     exit 1
   fi
 fi
+
+# Initialize LAST_RESTART_TIME from container/service so cooldown accounts for manual restarts (Linux)
+sync_restart_time_from_target
 
 # Validate endpoint before starting
 if ! validate_endpoint; then
