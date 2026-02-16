@@ -695,6 +695,23 @@ fi
 # Initialize LAST_RESTART_TIME from container/service so cooldown accounts for manual restarts (Linux)
 sync_restart_time_from_target
 
+# Log last restart time and holdoff status at startup (when container/service is used)
+if [ -n "$DOCKER_CONTAINER" ] || [ -n "$SERVICE_NAME" ]; then
+  if [ "$LAST_RESTART_TIME" -gt 0 ]; then
+    log "Last restart time: $(format_timestamp "$LAST_RESTART_TIME")"
+    current_time=$(date +%s)
+    time_since_restart=$((current_time - LAST_RESTART_TIME))
+    if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
+      log "Holdoff: active (${time_since_restart}s since restart, cooldown ${RESTART_COOLDOWN}s)"
+    else
+      log "Holdoff: inactive (${time_since_restart}s since restart, cooldown ${RESTART_COOLDOWN}s)"
+    fi
+  else
+    log "Last restart time: unknown (no previous start time from target)"
+    log "Holdoff: inactive"
+  fi
+fi
+
 # Validate endpoint before starting
 if ! validate_endpoint; then
   exit 1
