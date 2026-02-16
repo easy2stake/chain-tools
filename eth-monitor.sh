@@ -4,17 +4,21 @@
 RETH_URL="${RETH_URL:-http://127.0.0.1:8545}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-30}"
 BLOCK_LAG_THRESHOLD="${BLOCK_LAG_THRESHOLD:-60}"
-TIMEOUT="${TIMEOUT:-10}"
+TIMEOUT="${TIMEOUT:-2}"
 VERBOSE="${VERBOSE:-false}"
-LOG_FILE="${LOG_FILE:-$(dirname "$0")/reth-monitor.log}"
+LOG_FILE="${LOG_FILE:-$(dirname "$0")/log/eth-monitor.log}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
 CONTAINER_LOG_FOLDER="${CONTAINER_LOG_FOLDER:-}"
-HOST_LOG_DEST="${HOST_LOG_DEST:-$(dirname "$0")/container-logs}"
+HOST_LOG_DEST="${HOST_LOG_DEST:-$(dirname "$0")/log/container-logs}"
 DRY_RUN="${DRY_RUN:-false}"
+
+# Telegram configuration
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 
 # Track last restart time to prevent too frequent restarts
 LAST_RESTART_TIME=0
-RESTART_COOLDOWN="${RESTART_COOLDOWN:-300}"  # 5 minutes default cooldown
+RESTART_COOLDOWN="${RESTART_COOLDOWN:-21600}"  # 6 hours default cooldown
 
 # Function to display usage information
 usage() {
@@ -29,10 +33,10 @@ Options:
   -u, --url <url>         Override RETH_URL (default: $RETH_URL)
   -i, --interval <seconds> Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
   -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
-  -l, --log-file <path>   Override LOG_FILE (default: $LOG_FILE)
+  -l, --log-file <path>   Override LOG_FILE (default: log/eth-monitor.log, or log/<container>.log if -c set)
   -c, --container <name>  Docker container name to restart when threshold exceeded
   --container-logs <path> Path to log folder inside container to copy to host
-  --host-log-dest <path>  Destination folder on host for copied container logs (default: ./container-logs)
+  --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
 
 Environment Variables:
   RETH_URL                RPC endpoint URL
@@ -46,6 +50,8 @@ Environment Variables:
   HOST_LOG_DEST           Destination folder on host for copied container logs
   RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
   DRY_RUN                 Dry run mode flag (true/false)
+  TELEGRAM_BOT_TOKEN      Bot token for Telegram notifications (optional)
+  TELEGRAM_CHAT_ID        Chat ID for Telegram notifications (optional)
 
 Examples:
   $0
@@ -73,6 +79,52 @@ log() {
   # Append to log file
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "$log_entry" >> "$LOG_FILE"
+}
+
+# Function to send a message to Telegram chat.
+# Returns 0 on success, 1 if not configured or on failure.
+send_telegram_message() {
+  local message="$1"
+  local url
+  local payload
+  local response
+
+  if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+    log "WARN: Telegram not configured. TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing."
+    return 1
+  fi
+
+  url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+  payload=$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$message" \
+    '{chat_id: $chat_id, text: $text, parse_mode: "HTML"}') || {
+    log "WARN: Failed to build Telegram payload"
+    return 1
+  }
+
+  response=$(curl -s -w "\n%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    -m 10 \
+    "$url" 2>&1) || {
+    log "WARN: Failed to send Telegram message: curl failed"
+    return 1
+  }
+
+  local http_code
+  http_code=$(echo "$response" | tail -n1)
+  response=$(echo "$response" | sed '$d')
+
+  if [ "$http_code" != "200" ]; then
+    log "WARN: Failed to send Telegram message: HTTP ${http_code}"
+    return 1
+  fi
+
+  if ! echo "$response" | jq -e '.ok == true' >/dev/null 2>&1; then
+    log "WARN: Failed to send Telegram message: API returned error"
+    return 1
+  fi
+
+  return 0
 }
 
 # Function to convert hex to decimal
@@ -161,6 +213,7 @@ check_block_lag() {
   
   if [ -z "$block_number_hex" ] || [ -z "$block_timestamp_hex" ] || [ "$block_number_hex" == "null" ] || [ "$block_timestamp_hex" == "null" ]; then
     log "ERROR: Failed to extract block data"
+    send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to extract block data from RPC ($RETH_URL)"
     return 1
   fi
   
@@ -258,12 +311,14 @@ restart_docker_container() {
   
   if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
     log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
+    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Container: ${container_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)."
     return 1
   fi
   
   # Check if container exists
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
     log "ERROR: Docker container '${container_name}' not found"
+    send_telegram_message "❌ <b>eth-monitor</b>: Docker container '${container_name}' not found. Cannot restart."
     return 1
   fi
   
@@ -275,16 +330,20 @@ restart_docker_container() {
   # Restart the container
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart Docker container: ${container_name}"
+    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart container: ${container_name} (block lag exceeded on $RETH_URL)"
     LAST_RESTART_TIME=$current_time
     return 0
   else
     log "Restarting Docker container: ${container_name}"
+    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting container: ${container_name} (block lag exceeded on $RETH_URL)"
     if docker restart "$container_name" > /dev/null 2>&1; then
       LAST_RESTART_TIME=$current_time
       log "Successfully restarted Docker container: ${container_name}"
+      send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted container: ${container_name}"
       return 0
     else
       log "ERROR: Failed to restart Docker container: ${container_name}"
+      send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart container: ${container_name}"
       return 1
     fi
   fi
@@ -300,18 +359,21 @@ validate_endpoint() {
   
   if [ $? -ne 0 ]; then
     log "ERROR: Failed to connect to RPC endpoint"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — cannot connect to RPC endpoint $RETH_URL"
     return 1
   fi
   
   if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
     local error_msg=$(echo "$response" | jq -r '.error.message // "Unknown error"')
     log "ERROR: RPC error: $error_msg"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — RPC error: $error_msg ($RETH_URL)"
     return 1
   fi
   
   local block_number=$(echo "$response" | jq -r '.result')
   if [ "$block_number" == "null" ] || [ -z "$block_number" ]; then
     log "ERROR: Invalid response from RPC endpoint"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — invalid RPC response from $RETH_URL"
     return 1
   fi
   
@@ -358,11 +420,15 @@ monitor_loop() {
       local lag_status=$?
       
       # Restart container if threshold exceeded (ERROR status)
-      if [ $lag_status -eq 1 ] && [ -n "$DOCKER_CONTAINER" ]; then
-        restart_docker_container "$DOCKER_CONTAINER"
+      if [ $lag_status -eq 1 ]; then
+        send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RETH_URL${DOCKER_CONTAINER:+ | Container: $DOCKER_CONTAINER}"
+        if [ -n "$DOCKER_CONTAINER" ]; then
+          restart_docker_container "$DOCKER_CONTAINER"
+        fi
       fi
     else
       log "ERROR: Failed to fetch latest block"
+      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RETH_URL"
     fi
     
     # Sleep for the specified interval
@@ -419,6 +485,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# When using a container and log file was not explicitly set, use log/container-name.log
+default_log_file="$(dirname "$0")/log/eth-monitor.log"
+if [ -n "$DOCKER_CONTAINER" ] && [ "$LOG_FILE" = "$default_log_file" ]; then
+  LOG_FILE="$(dirname "$0")/log/${DOCKER_CONTAINER}.log"
+fi
 
 # Check if jq is available
 if ! command -v jq >/dev/null 2>&1; then
