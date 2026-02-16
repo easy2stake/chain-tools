@@ -24,8 +24,11 @@ declare -A TELEGRAM_RATE_LAST_SEND  # key -> last send timestamp for rate limiti
 # Track last restart time to prevent too frequent restarts
 LAST_RESTART_TIME=0
 RESTART_COOLDOWN="${RESTART_COOLDOWN:-21600}"  # 6 hours default cooldown
+
+# Dynamic variables
 CHAIN_ID=""  # Set at startup from eth_chainId (cosmetic / validation)
 CHAIN_SHORT_NAME=""  # Looked up from rpcs.json by chainId (cosmetic)
+MONITOR_HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
 
 # Function to display usage information
 usage() {
@@ -247,8 +250,8 @@ check_block_lag() {
   block_timestamp_hex=$(echo "$block_data" | jq -r '.result.timestamp // empty')
   
   if [ -z "$block_number_hex" ] || [ -z "$block_timestamp_hex" ] || [ "$block_number_hex" == "null" ] || [ "$block_timestamp_hex" == "null" ]; then
-    log "ERROR: Failed to extract block data"
-    send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to extract block data from RPC ($RPC_URL)"
+    log "ERROR [${MONITOR_HOSTNAME}]: Failed to extract block data"
+    send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to extract block data from RPC ($RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     return 1
   fi
   
@@ -389,7 +392,7 @@ restart_docker_container() {
   
   if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
     log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
-    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Container: ${container_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)." $((TELEGRAM_COOLDOWN_RATE_MINUTES * 60)) "cooldown_skip"
+    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Container: ${container_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). | Host: ${MONITOR_HOSTNAME}" $((TELEGRAM_COOLDOWN_RATE_MINUTES * 60)) "cooldown_skip"
     return 1
   fi
   
@@ -401,20 +404,20 @@ restart_docker_container() {
   # Restart the container
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart Docker container: ${container_name}"
-    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart container: ${container_name} (block lag exceeded on $RPC_URL)"
+    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart container: ${container_name} (block lag exceeded on $RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     LAST_RESTART_TIME=$current_time
     return 0
   else
     log "Restarting Docker container: ${container_name}"
-    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting container: ${container_name} (block lag exceeded on $RPC_URL)"
+    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting container: ${container_name} (block lag exceeded on $RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     if docker restart "$container_name" > /dev/null 2>&1; then
       LAST_RESTART_TIME=$current_time
       log "Successfully restarted Docker container: ${container_name}"
-      send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted container: ${container_name}"
+      send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted container: ${container_name} | Host: ${MONITOR_HOSTNAME}"
       return 0
     else
-      log "ERROR: Failed to restart Docker container: ${container_name}"
-      send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart container: ${container_name}"
+      log "ERROR [${MONITOR_HOSTNAME}]: Failed to restart Docker container: ${container_name}"
+      send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart container: ${container_name} | Host: ${MONITOR_HOSTNAME}"
       return 1
     fi
   fi
@@ -434,7 +437,7 @@ restart_systemd_service() {
 
   if [ $time_since_restart -lt $RESTART_COOLDOWN ]; then
     log "WARN: Restart cooldown active. Last restart was ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). Skipping restart."
-    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Service: ${service_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s)." $((TELEGRAM_COOLDOWN_RATE_MINUTES * 60)) "cooldown_skip"
+    send_telegram_message "⏳ <b>eth-monitor</b>: Restart skipped (cooldown). Service: ${service_name}. Last restart ${time_since_restart}s ago (cooldown: ${RESTART_COOLDOWN}s). | Host: ${MONITOR_HOSTNAME}" $((TELEGRAM_COOLDOWN_RATE_MINUTES * 60)) "cooldown_skip"
     return 1
   fi
 
@@ -442,20 +445,20 @@ restart_systemd_service() {
 
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart systemd service: ${service_name}"
-    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart service: ${service_name} (block lag exceeded on $RPC_URL)"
+    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart service: ${service_name} (block lag exceeded on $RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     LAST_RESTART_TIME=$current_time
     return 0
   else
     log "Restarting systemd service: ${service_name}"
-    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting service: ${service_name} (block lag exceeded on $RPC_URL)"
+    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting service: ${service_name} (block lag exceeded on $RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     if systemctl restart "$service_name" 2>/dev/null; then
       LAST_RESTART_TIME=$current_time
       log "Successfully restarted systemd service: ${service_name}"
-      send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted service: ${service_name}"
+      send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted service: ${service_name} | Host: ${MONITOR_HOSTNAME}"
       return 0
     else
-      log "ERROR: Failed to restart systemd service: ${service_name}"
-      send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart service: ${service_name}"
+      log "ERROR [${MONITOR_HOSTNAME}]: Failed to restart systemd service: ${service_name}"
+      send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart service: ${service_name} | Host: ${MONITOR_HOSTNAME}"
       return 1
     fi
   fi
@@ -494,7 +497,7 @@ sync_restart_time_from_target() {
   if [ "$current_started_at" -gt "$((LAST_RESTART_TIME + 10))" ] && [ "$LAST_RESTART_TIME" -gt 0 ]; then
     LAST_RESTART_TIME=$current_started_at
     log "Detected external restart of ${target_type} '${target_name}'. Cooldown applied (${RESTART_COOLDOWN}s)."
-    send_telegram_message "🔄 <b>eth-monitor</b>: Detected external restart of ${target_type} <b>${target_name}</b>. Cooldown applied (${RESTART_COOLDOWN}s)."
+    send_telegram_message "🔄 <b>eth-monitor</b>: Detected external restart of ${target_type} <b>${target_name}</b>. Cooldown applied (${RESTART_COOLDOWN}s). | Host: ${MONITOR_HOSTNAME}"
   elif [ "$current_started_at" -gt "$LAST_RESTART_TIME" ]; then
     LAST_RESTART_TIME=$current_started_at
   fi
@@ -525,22 +528,22 @@ validate_endpoint() {
   response=$(make_rpc_call "eth_blockNumber" "[]")
   
   if [ $? -ne 0 ]; then
-    log "ERROR: Failed to connect to RPC endpoint"
-    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — cannot connect to RPC endpoint $RPC_URL"
+    log "ERROR [${MONITOR_HOSTNAME}]: Failed to connect to RPC endpoint"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — cannot connect to RPC endpoint $RPC_URL | Host: ${MONITOR_HOSTNAME}"
     return 1
   fi
   
   if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
     local error_msg=$(echo "$response" | jq -r '.error.message // "Unknown error"')
-    log "ERROR: RPC error: $error_msg"
-    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — RPC error: $error_msg ($RPC_URL)"
+    log "ERROR [${MONITOR_HOSTNAME}]: RPC error: $error_msg"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — RPC error: $error_msg ($RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     return 1
   fi
   
   local block_number=$(echo "$response" | jq -r '.result')
   if [ "$block_number" == "null" ] || [ -z "$block_number" ]; then
-    log "ERROR: Invalid response from RPC endpoint"
-    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — invalid RPC response from $RPC_URL"
+    log "ERROR [${MONITOR_HOSTNAME}]: Invalid response from RPC endpoint"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — invalid RPC response from $RPC_URL | Host: ${MONITOR_HOSTNAME}"
     return 1
   fi
 
@@ -588,6 +591,7 @@ send_telegram_startup() {
   [ -n "$CHAIN_ID" ] && chain_line=$'\n<b>Chain ID:</b> '"${CHAIN_ID}${CHAIN_SHORT_NAME:+ (${CHAIN_SHORT_NAME})}"
 
   local msg="🟢 <b>eth-monitor started</b>${dry}
+<b>Host:</b> ${MONITOR_HOSTNAME}
 <b>RPC:</b> ${RPC_URL}${chain_line}
 <b>Interval:</b> ${MONITOR_INTERVAL}s · <b>Threshold:</b> ${BLOCK_LAG_THRESHOLD}s
 <b>Target:</b> ${target}
@@ -640,18 +644,18 @@ monitor_loop() {
       # Restart container or service if threshold exceeded (ERROR status)
       if [ $lag_status -eq 1 ]; then
         if [ -n "$DOCKER_CONTAINER" ]; then
-          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Container: $DOCKER_CONTAINER"
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Container: $DOCKER_CONTAINER | Host: ${MONITOR_HOSTNAME}"
           restart_docker_container "$DOCKER_CONTAINER"
         elif [ -n "$SERVICE_NAME" ]; then
-          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Service: $SERVICE_NAME"
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Service: $SERVICE_NAME | Host: ${MONITOR_HOSTNAME}"
           restart_systemd_service "$SERVICE_NAME"
         else
-          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL"
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Host: ${MONITOR_HOSTNAME}"
         fi
       fi
     else
-      log "ERROR: Failed to fetch latest block"
-      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RPC_URL"
+      log "ERROR [${MONITOR_HOSTNAME}]: Failed to fetch latest block"
+      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RPC_URL | Host: ${MONITOR_HOSTNAME}"
     fi
     
     # Sleep for the specified interval
