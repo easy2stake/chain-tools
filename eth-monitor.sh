@@ -25,6 +25,7 @@ declare -A TELEGRAM_RATE_LAST_SEND  # key -> last send timestamp for rate limiti
 LAST_RESTART_TIME=0
 RESTART_COOLDOWN="${RESTART_COOLDOWN:-21600}"  # 6 hours default cooldown
 CHAIN_ID=""  # Set at startup from eth_chainId (cosmetic / validation)
+CHAIN_SHORT_NAME=""  # Looked up from rpcs.json by chainId (cosmetic)
 
 # Function to display usage information
 usage() {
@@ -544,7 +545,14 @@ validate_endpoint() {
   fi
 
   get_chain_id
-  [ -n "$CHAIN_ID" ] && log "Chain ID: ${CHAIN_ID}"
+  if [ -n "$CHAIN_ID" ]; then
+    local rpcs_file="$(dirname "$0")/rpcs.json"
+    if [ -f "$rpcs_file" ]; then
+      CHAIN_SHORT_NAME=$(jq -r --argjson cid "$CHAIN_ID" '.[] | select(.chainId == $cid) | .shortName' "$rpcs_file" 2>/dev/null | head -n1)
+      [ "$CHAIN_SHORT_NAME" = "null" ] && CHAIN_SHORT_NAME=""
+    fi
+    log "Chain ID: ${CHAIN_ID}${CHAIN_SHORT_NAME:+ (${CHAIN_SHORT_NAME})}"
+  fi
   
   log "RPC endpoint validated successfully"
   return 0
@@ -577,7 +585,7 @@ send_telegram_startup() {
   [ "$DRY_RUN" == "true" ] && dry="\n<b>DRY RUN</b>"
 
   local chain_line=""
-  [ -n "$CHAIN_ID" ] && chain_line="\n<b>Chain ID:</b> ${CHAIN_ID}"
+  [ -n "$CHAIN_ID" ] && chain_line="\n<b>Chain ID:</b> ${CHAIN_ID}${CHAIN_SHORT_NAME:+ (${CHAIN_SHORT_NAME})}"
 
   local msg="🟢 <b>eth-monitor started</b>${dry}
 <b>RPC:</b> ${RPC_URL}${chain_line}
