@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Environment Variables (with defaults)
-RETH_URL="${RETH_URL:-http://127.0.0.1:8545}"
+RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-30}"
 BLOCK_LAG_THRESHOLD="${BLOCK_LAG_THRESHOLD:-60}"
 TIMEOUT="${TIMEOUT:-2}"
@@ -30,7 +30,7 @@ Options:
   -h, --help              Show this help message
   -v, --verbose           Enable verbose output
   -d, --dry-run           Dry run mode (simulate restarts without actually restarting)
-  -u, --url <url>         Override RETH_URL (default: $RETH_URL)
+  -u, --url <url>         Override RPC_URL (default: $RPC_URL)
   -i, --interval <seconds> Override MONITOR_INTERVAL (default: $MONITOR_INTERVAL)
   -t, --threshold <seconds> Override BLOCK_LAG_THRESHOLD (default: $BLOCK_LAG_THRESHOLD)
   -l, --log-file <path>   Override LOG_FILE (default: log/eth-monitor.log, or log/<container>.log if -c set)
@@ -39,7 +39,7 @@ Options:
   --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
 
 Environment Variables:
-  RETH_URL                RPC endpoint URL
+  RPC_URL                RPC endpoint URL
   MONITOR_INTERVAL        Seconds between checks
   BLOCK_LAG_THRESHOLD     Max allowed lag in seconds
   TIMEOUT                 Request timeout in seconds
@@ -57,7 +57,7 @@ Examples:
   $0
   $0 -u http://localhost:8545 -i 60
   $0 --url http://localhost:8545 --interval 60
-  RETH_URL=http://localhost:8545 MONITOR_INTERVAL=60 $0
+  RPC_URL=http://localhost:8545 MONITOR_INTERVAL=60 $0
   $0 -l /var/log/reth-monitor.log
   $0 -c reth-node --threshold 120
   $0 -c reth-node --dry-run  # Test without actually restarting
@@ -161,7 +161,7 @@ make_rpc_call() {
       \"method\": \"${method}\",
       \"params\": ${params},
       \"id\": 1
-    }" "$RETH_URL" 2>&1)
+    }" "$RPC_URL" 2>&1)
   
   if [ $? -ne 0 ]; then
     echo "{\"error\":{\"message\":\"curl failed: ${response}\"}}"
@@ -213,7 +213,7 @@ check_block_lag() {
   
   if [ -z "$block_number_hex" ] || [ -z "$block_timestamp_hex" ] || [ "$block_number_hex" == "null" ] || [ "$block_timestamp_hex" == "null" ]; then
     log "ERROR: Failed to extract block data"
-    send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to extract block data from RPC ($RETH_URL)"
+    send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to extract block data from RPC ($RPC_URL)"
     return 1
   fi
   
@@ -330,12 +330,12 @@ restart_docker_container() {
   # Restart the container
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart Docker container: ${container_name}"
-    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart container: ${container_name} (block lag exceeded on $RETH_URL)"
+    send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart container: ${container_name} (block lag exceeded on $RPC_URL)"
     LAST_RESTART_TIME=$current_time
     return 0
   else
     log "Restarting Docker container: ${container_name}"
-    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting container: ${container_name} (block lag exceeded on $RETH_URL)"
+    send_telegram_message "🔄 <b>eth-monitor</b>: Restarting container: ${container_name} (block lag exceeded on $RPC_URL)"
     if docker restart "$container_name" > /dev/null 2>&1; then
       LAST_RESTART_TIME=$current_time
       log "Successfully restarted Docker container: ${container_name}"
@@ -353,27 +353,27 @@ restart_docker_container() {
 validate_endpoint() {
   local response
   
-  log "Validating RPC endpoint: $RETH_URL"
+  log "Validating RPC endpoint: $RPC_URL"
   
   response=$(make_rpc_call "eth_blockNumber" "[]")
   
   if [ $? -ne 0 ]; then
     log "ERROR: Failed to connect to RPC endpoint"
-    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — cannot connect to RPC endpoint $RETH_URL"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — cannot connect to RPC endpoint $RPC_URL"
     return 1
   fi
   
   if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
     local error_msg=$(echo "$response" | jq -r '.error.message // "Unknown error"')
     log "ERROR: RPC error: $error_msg"
-    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — RPC error: $error_msg ($RETH_URL)"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — RPC error: $error_msg ($RPC_URL)"
     return 1
   fi
   
   local block_number=$(echo "$response" | jq -r '.result')
   if [ "$block_number" == "null" ] || [ -z "$block_number" ]; then
     log "ERROR: Invalid response from RPC endpoint"
-    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — invalid RPC response from $RETH_URL"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — invalid RPC response from $RPC_URL"
     return 1
   fi
   
@@ -421,14 +421,14 @@ monitor_loop() {
       
       # Restart container if threshold exceeded (ERROR status)
       if [ $lag_status -eq 1 ]; then
-        send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RETH_URL${DOCKER_CONTAINER:+ | Container: $DOCKER_CONTAINER}"
+        send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL${DOCKER_CONTAINER:+ | Container: $DOCKER_CONTAINER}"
         if [ -n "$DOCKER_CONTAINER" ]; then
           restart_docker_container "$DOCKER_CONTAINER"
         fi
       fi
     else
       log "ERROR: Failed to fetch latest block"
-      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RETH_URL"
+      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RPC_URL"
     fi
     
     # Sleep for the specified interval
@@ -452,7 +452,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -u|--url)
-      RETH_URL="$2"
+      RPC_URL="$2"
       shift 2
       ;;
     -i|--interval)
