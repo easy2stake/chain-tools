@@ -24,6 +24,7 @@ declare -A TELEGRAM_RATE_LAST_SEND  # key -> last send timestamp for rate limiti
 # Track last restart time to prevent too frequent restarts
 LAST_RESTART_TIME=0
 RESTART_COOLDOWN="${RESTART_COOLDOWN:-21600}"  # 6 hours default cooldown
+CHAIN_ID=""  # Set at startup from eth_chainId (cosmetic / validation)
 
 # Function to display usage information
 usage() {
@@ -498,6 +499,22 @@ sync_restart_time_from_target() {
   fi
 }
 
+# Fetch chain ID from RPC and set global CHAIN_ID (cosmetic). Does not log.
+get_chain_id() {
+  local response
+  local chain_id_hex
+
+  response=$(make_rpc_call "eth_chainId" "[]")
+  if [ $? -ne 0 ] || [ -z "$response" ] || echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  chain_id_hex=$(echo "$response" | jq -r '.result // empty')
+  if [ -n "$chain_id_hex" ] && [ "$chain_id_hex" != "null" ]; then
+    CHAIN_ID=$(hex_to_dec "$chain_id_hex")
+  fi
+}
+
 # Function to validate RPC endpoint
 validate_endpoint() {
   local response
@@ -525,6 +542,9 @@ validate_endpoint() {
     send_telegram_message "❌ <b>eth-monitor</b>: Startup validation failed — invalid RPC response from $RPC_URL"
     return 1
   fi
+
+  get_chain_id
+  [ -n "$CHAIN_ID" ] && log "Chain ID: ${CHAIN_ID}"
   
   log "RPC endpoint validated successfully"
   return 0
@@ -556,8 +576,11 @@ send_telegram_startup() {
   local dry=""
   [ "$DRY_RUN" == "true" ] && dry="\n<b>DRY RUN</b>"
 
+  local chain_line=""
+  [ -n "$CHAIN_ID" ] && chain_line="\n<b>Chain ID:</b> ${CHAIN_ID}"
+
   local msg="🟢 <b>eth-monitor started</b>${dry}
-<b>RPC:</b> ${RPC_URL}
+<b>RPC:</b> ${RPC_URL}${chain_line}
 <b>Interval:</b> ${MONITOR_INTERVAL}s · <b>Threshold:</b> ${BLOCK_LAG_THRESHOLD}s
 <b>Target:</b> ${target}
 <b>Cooldown:</b> ${RESTART_COOLDOWN}s · <b>Holdoff:</b> ${holdoff_status}
