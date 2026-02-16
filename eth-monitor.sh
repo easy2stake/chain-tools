@@ -184,8 +184,12 @@ check_block_lag() {
     status="ERROR"
   fi
   
-  # Log the status
-  log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status}"
+  # Log the status (include container name column if provided)
+  if [ -n "$DOCKER_CONTAINER" ]; then
+    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status} | Container: ${DOCKER_CONTAINER}"
+  else
+    log "Block: ${block_number} | Block Time: ${block_time_formatted} | Lag: ${lag}s | Status: ${status}"
+  fi
   
   # Verbose mode: show full JSON
   if [ "$VERBOSE" == "true" ]; then
