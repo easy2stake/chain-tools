@@ -1,0 +1,2 @@
+# Optional dependencies for run_eth_monitors.py
+pyyaml>=5.0

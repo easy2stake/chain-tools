@@ -1,0 +1,50 @@
+# eth-monitor wrapper configuration
+# Global defaults apply to all chains; per-chain entries override.
+
+global:
+  # Monitoring
+  interval: 10                    # seconds between checks (--interval)
+  threshold: 120                  # max block lag seconds before alert (--threshold)
+  timeout: 2                      # RPC request timeout in seconds (TIMEOUT env)
+  verbose: false                  # verbose output (-v)
+
+  # Restart control
+  restart_cooldown: 21600         # seconds between restarts, 6h default (RESTART_COOLDOWN env)
+  dry_run: false                  # simulate restarts only (-d)
+
+  # Logging
+  log_dir: "./log"                # base directory for log files; per-chain: log_dir/chain_name.log
+
+  # Container options (when using --container)
+  container_logs: ""              # path inside container to copy before restart (--container-logs)
+  host_log_dest: "./log/container-logs"  # destination for copied container logs (--host-log-dest)
+
+  # Service options (when using --service)
+  service_log_lines: 5000         # journal lines to capture before restart (--service-log-lines)
+  host_service_log_dest: "./log/service-logs"  # destination for service journal dumps
+
+  # Telegram (optional; can also use TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env)
+  telegram_token: ""
+  telegram_chat_id: ""
+  telegram_cooldown_rate_minutes: 5  # max one "restart skipped (cooldown)" message per N minutes
+
+# Per-chain definitions. Each chain runs as a separate eth-monitor.sh process.
+# Required per chain: name, url. Optional: container or service (mutually exclusive; for restart target).
+chains:
+  - name: linea
+    url: http://127.0.0.1:38545
+    container: linea-besu
+    # interval: 10      # uses global default
+    # threshold: 120   # uses global default
+
+  - name: mainnet
+    url: http://127.0.0.1:8545
+    container: mainnet-geth
+    interval: 30       # override: check less frequently
+    threshold: 120
+
+  # Example with systemd service instead of container
+  # - name: sepolia
+  #   url: http://127.0.0.1:18545
+  #   service: sepolia-reth
+  #   threshold: 300    # stricter threshold for testnet
