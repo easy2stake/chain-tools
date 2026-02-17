@@ -1,18 +1,18 @@
 #!/bin/bash
-# Install systemd service to run eth-monitors (run_eth_monitors.py)
+# Install systemd service to run eth-monitor (eth_monitor.py)
 # Installs as root, enables on boot, starts the service.
 
 set -e
 
 SERVICE_NAME="eth-monitors"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_SCRIPT="${SCRIPT_DIR}/run_eth_monitors.py"
+PYTHON_SCRIPT="${SCRIPT_DIR}/eth_monitor.py"
 CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 UNIT_DIR="/etc/systemd/system"
 
 # Sanity checks
 if [[ ! -f "$PYTHON_SCRIPT" ]]; then
-    echo "ERROR: run_eth_monitors.py not found at $PYTHON_SCRIPT" >&2
+    echo "ERROR: eth_monitor.py not found at $PYTHON_SCRIPT" >&2
     exit 1
 fi
 
@@ -34,7 +34,7 @@ trap 'rm -f "$TMP_UNIT"' EXIT
 
 cat > "$TMP_UNIT" << EOF
 [Unit]
-Description=Eth monitors (run_eth_monitors.py)
+Description=Eth monitor (eth_monitor.py)
 After=network-online.target
 Wants=network-online.target
 
