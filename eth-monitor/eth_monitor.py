@@ -131,9 +131,16 @@ class ChainMonitor:
         self.chain_short_name = ""
         self._log_file = self.cfg.get("log_file") or str(script_dir / "log" / "eth-monitor.log")
 
+    def _chain_prefix(self) -> str:
+        if self.chain_id is not None:
+            sn = f" ({self.chain_short_name})" if self.chain_short_name else ""
+            return f"Chain ID: {self.chain_id}{sn}"
+        return f"Chain: {self.cfg.get('name', '?')}"
+
     def _log(self, msg: str) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entry = f"[{ts}] {msg}"
+        prefix = self._chain_prefix()
+        entry = f"{prefix} | [{ts}] {msg}"
         print(entry)
         Path(self._log_file).parent.mkdir(parents=True, exist_ok=True)
         with open(self._log_file, "a", encoding="utf-8") as f:
@@ -539,6 +546,9 @@ class ChainMonitor:
         try:
             self._sync_restart_time_from_target()
 
+            if not self._validate_endpoint():
+                return
+
             # Log last restart time and holdoff at startup (match eth-monitor.sh)
             container = self.cfg.get("container")
             service = self.cfg.get("service")
@@ -556,8 +566,6 @@ class ChainMonitor:
                     self._log("Last restart time: unknown (no previous start time from target)")
                     self._log("Holdoff: inactive")
 
-            if not self._validate_endpoint():
-                return
             self._send_telegram_startup()
 
             interval = self.cfg.get("interval", 10)
