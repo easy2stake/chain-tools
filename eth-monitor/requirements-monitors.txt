@@ -1,2 +1,2 @@
-# Optional dependencies for run_eth_monitors.py
+# Optional dependencies for rpc-watcher.py
 pyyaml>=5.0

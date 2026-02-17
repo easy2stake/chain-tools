@@ -14,14 +14,14 @@ To run the monitors as a systemd service (runs as root, starts on boot):
 
 2. **Install:** Run the install script (requires sudo):
    ```bash
-   ./install-eth-monitors-service.sh
+   ./install-rpc-watcher-service.sh
    ```
    This installs the service, enables it on boot, and starts it.
 
 3. **Manage the service:**
    ```bash
-   sudo systemctl status eth-monitors   # check status
-   sudo systemctl start eth-monitors    # start
-   sudo systemctl stop eth-monitors     # stop
-   journalctl -u eth-monitors -f       # follow logs
+   sudo systemctl status rpc-watcher   # check status
+   sudo systemctl start rpc-watcher    # start
+   sudo systemctl stop rpc-watcher     # stop
+   journalctl -u rpc-watcher -f        # follow logs
    ```

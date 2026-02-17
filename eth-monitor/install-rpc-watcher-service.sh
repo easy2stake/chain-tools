@@ -1,18 +1,18 @@
 #!/bin/bash
-# Install systemd service to run eth-monitor (eth_monitor.py)
+# Install systemd service to run rpc-watcher (rpc-watcher.py)
 # Installs as root, enables on boot, starts the service.
 
 set -e
 
 SERVICE_NAME="rpc-watcher"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_SCRIPT="${SCRIPT_DIR}/eth_monitor.py"
+PYTHON_SCRIPT="${SCRIPT_DIR}/rpc-watcher.py"
 CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 UNIT_DIR="/etc/systemd/system"
 
 # Sanity checks
 if [[ ! -f "$PYTHON_SCRIPT" ]]; then
-    echo "ERROR: eth_monitor.py not found at $PYTHON_SCRIPT" >&2
+    echo "ERROR: rpc-watcher.py not found at $PYTHON_SCRIPT" >&2
     exit 1
 fi
 
@@ -34,16 +34,17 @@ trap 'rm -f "$TMP_UNIT"' EXIT
 
 cat > "$TMP_UNIT" << EOF
 [Unit]
-Description=Eth monitor (eth_monitor.py)
+Description=RPC watcher (rpc-watcher.py)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$PYTHON $PYTHON_SCRIPT
+ExecStart=$PYTHON -u $PYTHON_SCRIPT
 WorkingDirectory=$SCRIPT_DIR
 Restart=on-failure
 RestartSec=30
+Environment=PYTHONUNBUFFERED=1
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rpc-watcher
