@@ -27,6 +27,8 @@ CONFIG_TO_CLI = {
     "log_file": ("--log-file", None),
     "container": ("--container", None),
     "service": ("--service", None),
+    "secondary_containers": ("--secondary-containers", None),
+    "secondary_services": ("--secondary-services", None),
     "container_logs": ("--container-logs", None),
     "host_log_dest": ("--host-log-dest", None),
     "service_log_lines": ("--service-log-lines", None),
@@ -83,7 +85,11 @@ def build_args_and_env(cfg: dict, script_path: Path) -> tuple[list[str], dict[st
         val = cfg.get(key)
         if val is None or val == "":
             continue
-        args.extend([arg_name, str(val)])
+        if isinstance(val, list):
+            val = ",".join(str(v) for v in val)
+        else:
+            val = str(val)
+        args.extend([arg_name, val])
 
     # Boolean flags
     if cfg.get("dry_run"):

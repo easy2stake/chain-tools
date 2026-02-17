@@ -40,6 +40,8 @@ chains:
   - name: mainnet
     url: http://127.0.0.1:8545
     container: mainnet-geth
+    secondary_containers: "indexer,other-container"   # optional: restart these when main is restarted
+    secondary_services: "my-sidecar"                  # optional: restart these when main is restarted
     interval: 30       # override: check less frequently
     threshold: 120
 

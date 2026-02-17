@@ -13,6 +13,8 @@ HOST_LOG_DEST="${HOST_LOG_DEST:-$(dirname "$0")/log/container-logs}"
 SERVICE_NAME="${SERVICE_NAME:-}"
 SERVICE_LOG_LINES="${SERVICE_LOG_LINES:-5000}"
 HOST_SERVICE_LOG_DEST="${HOST_SERVICE_LOG_DEST:-$(dirname "$0")/log/service-logs}"
+SECONDARY_CONTAINERS="${SECONDARY_CONTAINERS:-}"
+SECONDARY_SERVICES="${SECONDARY_SERVICES:-}"
 DRY_RUN="${DRY_RUN:-false}"
 
 # Telegram configuration
@@ -46,6 +48,8 @@ Options:
   -l, --log-file <path>   Override LOG_FILE (default: log/eth-monitor.log, or log/<name>.log if -c/-s set)
   -c, --container <name>  Docker container name to restart when threshold exceeded (mutually exclusive with -s)
   -s, --service <name>    Systemd service name to restart when threshold exceeded (mutually exclusive with -c)
+  --secondary-containers <list>  Comma-separated Docker container names to restart when main is restarted
+  --secondary-services <list>    Comma-separated systemd service names to restart when main is restarted
   --container-logs <path> Path to log folder inside container to copy to host
   --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
   --service-log-lines <n> Number of journal lines to capture for service before restart (default: 5000)
@@ -66,6 +70,8 @@ Environment Variables:
   SERVICE_NAME            Systemd service name to restart when threshold exceeded (mutually exclusive with DOCKER_CONTAINER)
   SERVICE_LOG_LINES       Journal lines to capture before service restart (default: 5000)
   HOST_SERVICE_LOG_DEST   Destination for service journal dumps (default: ./log/service-logs)
+  SECONDARY_CONTAINERS    Comma-separated Docker container names to restart when main is restarted
+  SECONDARY_SERVICES      Comma-separated systemd service names to restart when main is restarted
   RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
   DRY_RUN                 Dry run mode flag (true/false)
   TELEGRAM_BOT_TOKEN      Bot token for Telegram notifications (optional)
@@ -404,6 +410,7 @@ restart_docker_container() {
   # Restart the container
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart Docker container: ${container_name}"
+    restart_secondary_targets
     send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart container: ${container_name} (block lag exceeded on $RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     LAST_RESTART_TIME=$current_time
     return 0
@@ -413,6 +420,7 @@ restart_docker_container() {
     if docker restart "$container_name" > /dev/null 2>&1; then
       LAST_RESTART_TIME=$current_time
       log "Successfully restarted Docker container: ${container_name}"
+      restart_secondary_targets
       send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted container: ${container_name} | Host: ${MONITOR_HOSTNAME}"
       return 0
     else
@@ -445,6 +453,7 @@ restart_systemd_service() {
 
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart systemd service: ${service_name}"
+    restart_secondary_targets
     send_telegram_message "🔄 <b>eth-monitor</b> [DRY RUN]: Would restart service: ${service_name} (block lag exceeded on $RPC_URL) | Host: ${MONITOR_HOSTNAME}"
     LAST_RESTART_TIME=$current_time
     return 0
@@ -454,6 +463,7 @@ restart_systemd_service() {
     if systemctl restart "$service_name" 2>/dev/null; then
       LAST_RESTART_TIME=$current_time
       log "Successfully restarted systemd service: ${service_name}"
+      restart_secondary_targets
       send_telegram_message "✅ <b>eth-monitor</b>: Successfully restarted service: ${service_name} | Host: ${MONITOR_HOSTNAME}"
       return 0
     else
@@ -461,6 +471,39 @@ restart_systemd_service() {
       send_telegram_message "❌ <b>eth-monitor</b>: Failed to restart service: ${service_name} | Host: ${MONITOR_HOSTNAME}"
       return 1
     fi
+  fi
+}
+
+# Restart secondary containers and services when main is restarted. No log copy or extra logic.
+restart_secondary_targets() {
+  local c s
+  if [ -n "$SECONDARY_CONTAINERS" ]; then
+    IFS=',' read -ra arr <<< "$SECONDARY_CONTAINERS"
+    for c in "${arr[@]}"; do
+      c=$(echo "$c" | xargs)
+      [ -z "$c" ] && continue
+      if [ "$DRY_RUN" == "true" ]; then
+        log "[DRY RUN] Would restart secondary container: ${c}"
+      elif docker restart "$c" > /dev/null 2>&1; then
+        log "Restarted secondary container: ${c}"
+      else
+        log "WARN: Failed to restart secondary container: ${c}"
+      fi
+    done
+  fi
+  if [ -n "$SECONDARY_SERVICES" ]; then
+    IFS=',' read -ra arr <<< "$SECONDARY_SERVICES"
+    for s in "${arr[@]}"; do
+      s=$(echo "$s" | xargs)
+      [ -z "$s" ] && continue
+      if [ "$DRY_RUN" == "true" ]; then
+        log "[DRY RUN] Would restart secondary service: ${s}"
+      elif systemctl restart "$s" 2>/dev/null; then
+        log "Restarted secondary service: ${s}"
+      else
+        log "WARN: Failed to restart secondary service: ${s}"
+      fi
+    done
   fi
 }
 
@@ -618,6 +661,9 @@ monitor_loop() {
     if [ -n "$CONTAINER_LOG_FOLDER" ]; then
       log "Container log copying enabled: ${CONTAINER_LOG_FOLDER} -> ${HOST_LOG_DEST}"
     fi
+    if [ -n "$SECONDARY_CONTAINERS" ] || [ -n "$SECONDARY_SERVICES" ]; then
+      log "Secondary targets: containers=[${SECONDARY_CONTAINERS:-—}] services=[${SECONDARY_SERVICES:-—}]"
+    fi
   fi
   if [ -n "$SERVICE_NAME" ]; then
     if [ "$DRY_RUN" == "true" ]; then
@@ -626,8 +672,11 @@ monitor_loop() {
       log "Systemd service restart enabled: ${SERVICE_NAME} (cooldown: ${RESTART_COOLDOWN}s)"
     fi
     log "Service journal capture: last ${SERVICE_LOG_LINES} lines -> ${HOST_SERVICE_LOG_DEST}"
+    if [ -n "$SECONDARY_CONTAINERS" ] || [ -n "$SECONDARY_SERVICES" ]; then
+      log "Secondary targets: containers=[${SECONDARY_CONTAINERS:-—}] services=[${SECONDARY_SERVICES:-—}]"
+    fi
   fi
-  
+
   # Set up signal handlers
   trap cleanup SIGINT SIGTERM
   
@@ -644,13 +693,13 @@ monitor_loop() {
       # Restart container or service if threshold exceeded (ERROR status)
       if [ $lag_status -eq 1 ]; then
         if [ -n "$DOCKER_CONTAINER" ]; then
-          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Container: $DOCKER_CONTAINER | Host: ${MONITOR_HOSTNAME}"
+          #send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Container: $DOCKER_CONTAINER | Host: ${MONITOR_HOSTNAME}"
           restart_docker_container "$DOCKER_CONTAINER"
         elif [ -n "$SERVICE_NAME" ]; then
-          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Service: $SERVICE_NAME | Host: ${MONITOR_HOSTNAME}"
+          #send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Service: $SERVICE_NAME | Host: ${MONITOR_HOSTNAME}"
           restart_systemd_service "$SERVICE_NAME"
         else
-          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Host: ${MONITOR_HOSTNAME}"
+          #send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Host: ${MONITOR_HOSTNAME}"
         fi
       fi
     else
@@ -700,6 +749,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     -s|--service)
       SERVICE_NAME="$2"
+      shift 2
+      ;;
+    --secondary-containers)
+      SECONDARY_CONTAINERS="$2"
+      shift 2
+      ;;
+    --secondary-services)
+      SECONDARY_SERVICES="$2"
       shift 2
       ;;
     --container-logs)
