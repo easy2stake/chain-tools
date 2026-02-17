@@ -17,7 +17,8 @@ global:
   log_dir: "./log"                # base directory for log files; per-chain: log_dir/chain_name.log
 
   # Container options (when using --container)
-  container_logs: ""              # path inside container to copy before restart (--container-logs)
+  container_log_lines: 5000       # docker log lines to capture before restart (like service_log_lines)
+  container_logs: ""               # optional: path inside container to copy (in addition to docker logs)
   host_log_dest: "./log/container-logs"  # destination for copied container logs (--host-log-dest)
 
   # Service options (when using --service)

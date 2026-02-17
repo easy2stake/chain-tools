@@ -9,6 +9,7 @@ VERBOSE="${VERBOSE:-false}"
 LOG_FILE="${LOG_FILE:-$(dirname "$0")/log/eth-monitor.log}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
 CONTAINER_LOG_FOLDER="${CONTAINER_LOG_FOLDER:-}"
+CONTAINER_LOG_LINES="${CONTAINER_LOG_LINES:-5000}"
 HOST_LOG_DEST="${HOST_LOG_DEST:-$(dirname "$0")/log/container-logs}"
 SERVICE_NAME="${SERVICE_NAME:-}"
 SERVICE_LOG_LINES="${SERVICE_LOG_LINES:-5000}"
@@ -52,7 +53,8 @@ Options:
   --secondary-containers <list>  Comma-separated Docker container names to restart when main is restarted
   --secondary-services <list>    Comma-separated systemd service names to restart when main is restarted
   --stuck-check-interval <sec>   Seconds to wait before re-checking block (restart only if block stuck)
-  --container-logs <path> Path to log folder inside container to copy to host
+  --container-logs <path> Path to log folder inside container to copy to host (optional, in addition to docker logs)
+  --container-log-lines <n> Number of docker log lines to capture before restart (default: 5000)
   --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
   --service-log-lines <n> Number of journal lines to capture for service before restart (default: 5000)
   --host-service-log-dest <path> Destination for service journal dumps (default: ./log/service-logs)
@@ -67,7 +69,8 @@ Environment Variables:
   VERBOSE                 Verbose output flag (true/false)
   LOG_FILE                Path to log file
   DOCKER_CONTAINER        Docker container name to restart when threshold exceeded (mutually exclusive with SERVICE_NAME)
-  CONTAINER_LOG_FOLDER    Path to log folder inside container to copy to host
+  CONTAINER_LOG_FOLDER    Path to log folder inside container to copy to host (optional)
+  CONTAINER_LOG_LINES     Docker log lines to capture before restart (default: 5000)
   HOST_LOG_DEST           Destination folder on host for copied container logs
   SERVICE_NAME            Systemd service name to restart when threshold exceeded (mutually exclusive with DOCKER_CONTAINER)
   SERVICE_LOG_LINES       Journal lines to capture before service restart (default: 5000)
@@ -337,7 +340,40 @@ check_block_lag() {
   fi
 }
 
-# Function to copy logs from container to host
+# Function to copy docker logs (stdout/stderr) to host - last N lines, like journalctl for systemd
+copy_container_docker_logs() {
+  local container_name="$1"
+  local host_dest="$2"
+  local lines="${CONTAINER_LOG_LINES:-5000}"
+
+  if [ -z "$container_name" ]; then
+    return 0
+  fi
+
+  mkdir -p "$host_dest"
+  local timestamp=$(date '+%Y%m%d_%H%M%S')
+  local dest_file="${host_dest}/${container_name}_${timestamp}.container.log"
+
+  if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+    log "WARN: Docker container '${container_name}' not found, skipping docker logs copy"
+    return 1
+  fi
+
+  log "Copying docker logs for ${container_name} (last ${lines} lines) to ${dest_file}"
+  if docker logs --tail "$lines" "$container_name" 2>&1 > "$dest_file"; then
+    if [ "$DRY_RUN" == "true" ]; then
+      log "[DRY RUN] Successfully copied docker logs to ${dest_file}"
+    else
+      log "Successfully copied docker logs to ${dest_file}"
+    fi
+    return 0
+  else
+    log "WARN: Failed to copy docker logs for container '${container_name}'"
+    return 1
+  fi
+}
+
+# Function to copy log folder from inside container to host (optional, in addition to docker logs)
 copy_container_logs() {
   local container_name="$1"
   local container_log_path="$2"
@@ -428,11 +464,12 @@ restart_docker_container() {
     return 1
   fi
   
-  # Copy logs from container before restarting (if configured)
+  # Copy logs from container before restarting (always: docker logs, like journalctl for systemd)
+  copy_container_docker_logs "$container_name" "$HOST_LOG_DEST"
   if [ -n "$CONTAINER_LOG_FOLDER" ]; then
     copy_container_logs "$container_name" "$CONTAINER_LOG_FOLDER" "$HOST_LOG_DEST"
   fi
-  
+
   # Restart the container
   if [ "$DRY_RUN" == "true" ]; then
     log "[DRY RUN] Would restart Docker container: ${container_name}"
@@ -684,8 +721,9 @@ monitor_loop() {
     else
       log "Docker container restart enabled: ${DOCKER_CONTAINER} (cooldown: ${RESTART_COOLDOWN}s)"
     fi
+    log "Container log capture: last ${CONTAINER_LOG_LINES} docker log lines -> ${HOST_LOG_DEST}"
     if [ -n "$CONTAINER_LOG_FOLDER" ]; then
-      log "Container log copying enabled: ${CONTAINER_LOG_FOLDER} -> ${HOST_LOG_DEST}"
+      log "Container folder copy enabled: ${CONTAINER_LOG_FOLDER} -> ${HOST_LOG_DEST}"
     fi
     if [ -n "$SECONDARY_CONTAINERS" ] || [ -n "$SECONDARY_SERVICES" ]; then
       log "Secondary targets: containers=[${SECONDARY_CONTAINERS:-—}] services=[${SECONDARY_SERVICES:-—}]"
@@ -815,6 +853,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --container-logs)
       CONTAINER_LOG_FOLDER="$2"
+      shift 2
+      ;;
+    --container-log-lines)
+      CONTAINER_LOG_LINES="$2"
       shift 2
       ;;
     --host-log-dest)
