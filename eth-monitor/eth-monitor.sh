@@ -922,6 +922,7 @@ fi
 if [ -n "$DOCKER_CONTAINER" ]; then
   if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${DOCKER_CONTAINER}$"; then
     echo "ERROR: Docker container '${DOCKER_CONTAINER}' not found. List containers with: docker ps -a"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup failed — Docker container <b>${DOCKER_CONTAINER}</b> not found | Host: ${MONITOR_HOSTNAME}"
     exit 1
   fi
 fi
@@ -930,6 +931,7 @@ fi
 if [ -n "$SERVICE_NAME" ]; then
   if ! systemctl show "$SERVICE_NAME" &>/dev/null; then
     echo "ERROR: Systemd service '${SERVICE_NAME}' not found. List units with: systemctl list-units -t service"
+    send_telegram_message "❌ <b>eth-monitor</b>: Startup failed — Systemd service <b>${SERVICE_NAME}</b> not found | Host: ${MONITOR_HOSTNAME}"
     exit 1
   fi
 fi
