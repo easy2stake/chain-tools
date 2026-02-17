@@ -3,3 +3,4 @@
 /__pycache__
 log/
 eth-monitor/config.yaml
+/eth-monitor/__pycache__
