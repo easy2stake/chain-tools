@@ -7,7 +7,7 @@ set -e
 SERVICE_NAME="eth-monitors"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="${SCRIPT_DIR}/run_eth_monitors.py"
-CONFIG_FILE="${SCRIPT_DIR}/eth-monitor-config.yaml"
+CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 UNIT_DIR="/etc/systemd/system"
 
 # Sanity checks
@@ -18,7 +18,7 @@ fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found at $CONFIG_FILE" >&2
-    echo "Copy eth-monitor-config-example.yaml to eth-monitor-config.yaml and edit it." >&2
+    echo "Copy config-example.yaml to config.yaml and edit it." >&2
     exit 1
 fi
 

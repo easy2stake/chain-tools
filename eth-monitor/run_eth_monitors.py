@@ -130,7 +130,7 @@ def main() -> None:
     parser.add_argument(
         "-c", "--config",
         type=Path,
-        default=Path(__file__).resolve().parent / "eth-monitor-config.yaml",
+        default=Path(__file__).resolve().parent / "config.yaml",
         help="Path to YAML config file",
     )
     parser.add_argument(

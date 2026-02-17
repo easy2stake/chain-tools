@@ -8,8 +8,8 @@ To run the monitors as a systemd service (runs as root, starts on boot):
 
 1. **Create config:** Copy the example and edit:
    ```bash
-   cp eth-monitor-config-example.yaml eth-monitor-config.yaml
-   # Edit eth-monitor-config.yaml with your chains and RPC URLs
+   cp config-example.yaml config.yaml
+   # Edit config.yaml with your chains and RPC URLs
    ```
 
 2. **Install:** Run the install script (requires sudo):
