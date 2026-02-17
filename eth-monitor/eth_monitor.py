@@ -693,23 +693,28 @@ def main() -> None:
     monitors = []
     for ch in chains:
         merged = merge_chain_config(global_cfg, ch, SCRIPT_DIR)
+        name = merged.get("name", "?")
         container = merged.get("container")
         service = merged.get("service")
 
         if container:
             r = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=5)
             if container not in (r.stdout or "").splitlines():
-                print(f"ERROR: Docker container '{container}' not found", file=sys.stderr)
-                _send_startup_failure_telegram(merged, f"Startup failed — Docker container <b>{container}</b> not found")
-                sys.exit(1)
+                print(f"ERROR: Docker container '{container}' not found - skipping chain '{name}'", file=sys.stderr)
+                _send_startup_failure_telegram(merged, f"Startup failed — Docker container <b>{container}</b> not found (skipping chain <b>{name}</b>)")
+                continue
         if service:
             r = subprocess.run(["systemctl", "show", service], capture_output=True, timeout=5)
             if r.returncode != 0:
-                print(f"ERROR: Systemd service '{service}' not found", file=sys.stderr)
-                _send_startup_failure_telegram(merged, f"Startup failed — Systemd service <b>{service}</b> not found")
-                sys.exit(1)
+                print(f"ERROR: Systemd service '{service}' not found - skipping chain '{name}'", file=sys.stderr)
+                _send_startup_failure_telegram(merged, f"Startup failed — Systemd service <b>{service}</b> not found (skipping chain <b>{name}</b>)")
+                continue
 
         monitors.append(ChainMonitor(merged, SCRIPT_DIR))
+
+    if not monitors:
+        print("ERROR: No chains started (all skipped due to missing container/service)", file=sys.stderr)
+        sys.exit(1)
 
     shutdown = threading.Event()
 
