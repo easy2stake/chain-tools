@@ -4,7 +4,7 @@
 
 set -e
 
-SERVICE_NAME="eth-monitors"
+SERVICE_NAME="rpc-watcher"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="${SCRIPT_DIR}/eth_monitor.py"
 CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
@@ -46,7 +46,7 @@ Restart=on-failure
 RestartSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=eth-monitors
+SyslogIdentifier=rpc-watcher
 
 [Install]
 WantedBy=multi-user.target
