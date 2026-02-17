@@ -15,6 +15,7 @@ SERVICE_LOG_LINES="${SERVICE_LOG_LINES:-5000}"
 HOST_SERVICE_LOG_DEST="${HOST_SERVICE_LOG_DEST:-$(dirname "$0")/log/service-logs}"
 SECONDARY_CONTAINERS="${SECONDARY_CONTAINERS:-}"
 SECONDARY_SERVICES="${SECONDARY_SERVICES:-}"
+STUCK_CHECK_INTERVAL="${STUCK_CHECK_INTERVAL:-30}"
 DRY_RUN="${DRY_RUN:-false}"
 
 # Telegram configuration
@@ -50,6 +51,7 @@ Options:
   -s, --service <name>    Systemd service name to restart when threshold exceeded (mutually exclusive with -c)
   --secondary-containers <list>  Comma-separated Docker container names to restart when main is restarted
   --secondary-services <list>    Comma-separated systemd service names to restart when main is restarted
+  --stuck-check-interval <sec>   Seconds to wait before re-checking block (restart only if block stuck)
   --container-logs <path> Path to log folder inside container to copy to host
   --host-log-dest <path>  Destination folder on host for copied container logs (default: ./log/container-logs)
   --service-log-lines <n> Number of journal lines to capture for service before restart (default: 5000)
@@ -72,6 +74,7 @@ Environment Variables:
   HOST_SERVICE_LOG_DEST   Destination for service journal dumps (default: ./log/service-logs)
   SECONDARY_CONTAINERS    Comma-separated Docker container names to restart when main is restarted
   SECONDARY_SERVICES      Comma-separated systemd service names to restart when main is restarted
+  STUCK_CHECK_INTERVAL    Seconds to wait to confirm block is stuck before restart (default: 30)
   RESTART_COOLDOWN        Minimum seconds between restarts (default: 300)
   DRY_RUN                 Dry run mode flag (true/false)
   TELEGRAM_BOT_TOKEN      Bot token for Telegram notifications (optional)
@@ -238,6 +241,29 @@ get_latest_block() {
   fi
   
   echo "$response"
+}
+
+# Function to check if node is syncing via eth_syncing.
+# Returns 0 if not syncing (or cannot determine), 1 if syncing.
+# When syncing: skip restart logic (lag during sync is expected).
+is_syncing() {
+  local response
+  local result
+  response=$(make_rpc_call "eth_syncing" "[]")
+  if [ $? -ne 0 ] || [ -z "$response" ]; then
+    return 0
+  fi
+  if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
+    return 0
+  fi
+  result=$(echo "$response" | jq -r '.result')
+  if [ "$result" == "null" ] || [ -z "$result" ]; then
+    return 0
+  fi
+  if [ "$result" == "false" ]; then
+    return 0
+  fi
+  return 1
 }
 
 # Function to check block lag
@@ -664,6 +690,7 @@ monitor_loop() {
     if [ -n "$SECONDARY_CONTAINERS" ] || [ -n "$SECONDARY_SERVICES" ]; then
       log "Secondary targets: containers=[${SECONDARY_CONTAINERS:-—}] services=[${SECONDARY_SERVICES:-—}]"
     fi
+    log "Restart only if block stuck: eth_syncing=false and block unchanged for ${STUCK_CHECK_INTERVAL}s"
   fi
   if [ -n "$SERVICE_NAME" ]; then
     if [ "$DRY_RUN" == "true" ]; then
@@ -675,6 +702,7 @@ monitor_loop() {
     if [ -n "$SECONDARY_CONTAINERS" ] || [ -n "$SECONDARY_SERVICES" ]; then
       log "Secondary targets: containers=[${SECONDARY_CONTAINERS:-—}] services=[${SECONDARY_SERVICES:-—}]"
     fi
+    log "Restart only if block stuck: eth_syncing=false and block unchanged for ${STUCK_CHECK_INTERVAL}s"
   fi
 
   # Set up signal handlers
@@ -690,16 +718,38 @@ monitor_loop() {
       check_block_lag "$block_data"
       local lag_status=$?
       
-      # Restart container or service if threshold exceeded (ERROR status)
+      # Restart container or service only if: lag exceeded AND not syncing AND block truly stuck
       if [ $lag_status -eq 1 ]; then
-        if [ -n "$DOCKER_CONTAINER" ]; then
-          #send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Container: $DOCKER_CONTAINER | Host: ${MONITOR_HOSTNAME}"
-          restart_docker_container "$DOCKER_CONTAINER"
-        elif [ -n "$SERVICE_NAME" ]; then
-          #send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Service: $SERVICE_NAME | Host: ${MONITOR_HOSTNAME}"
-          restart_systemd_service "$SERVICE_NAME"
+        if [ -n "$DOCKER_CONTAINER" ] || [ -n "$SERVICE_NAME" ]; then
+          # Skip restart if node is syncing (lag during sync is expected)
+          if ! is_syncing; then
+            log "Node is syncing. Skipping restart (lag during sync is expected)."
+          else
+            log "Node not syncing. Checking if block is stuck (waiting ${STUCK_CHECK_INTERVAL}s)..."
+            local initial_block_hex
+            initial_block_hex=$(echo "$block_data" | jq -r '.result.number // empty')
+            sleep "$STUCK_CHECK_INTERVAL"
+            local new_block_data
+            new_block_data=$(get_latest_block)
+            if [ $? -ne 0 ] || [ -z "$new_block_data" ]; then
+              log "WARN: Failed to fetch block after stuck-check wait. Skipping restart this cycle."
+            else
+              local new_block_hex
+              new_block_hex=$(echo "$new_block_data" | jq -r '.result.number // empty')
+              if [ "$initial_block_hex" != "$new_block_hex" ]; then
+                log "Block moved from ${initial_block_hex} to ${new_block_hex}. Chain is active. No restart needed."
+              else
+                log "Block stuck at ${initial_block_hex} for ${STUCK_CHECK_INTERVAL}s. Proceeding with restart."
+                if [ -n "$DOCKER_CONTAINER" ]; then
+                  restart_docker_container "$DOCKER_CONTAINER"
+                else
+                  restart_systemd_service "$SERVICE_NAME"
+                fi
+              fi
+            fi
+          fi
         else
-          #send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Host: ${MONITOR_HOSTNAME}"
+          send_telegram_message "⚠️ <b>eth-monitor</b>: Block lag exceeded threshold (${BLOCK_LAG_THRESHOLD}s) on $RPC_URL | Host: ${MONITOR_HOSTNAME}"
         fi
       fi
     else
@@ -757,6 +807,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --secondary-services)
       SECONDARY_SERVICES="$2"
+      shift 2
+      ;;
+    --stuck-check-interval)
+      STUCK_CHECK_INTERVAL="$2"
       shift 2
       ;;
     --container-logs)

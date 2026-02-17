@@ -10,6 +10,7 @@ global:
 
   # Restart control
   restart_cooldown: 21600         # seconds between restarts, 6h default (RESTART_COOLDOWN env)
+  stuck_check_interval: 30        # seconds to wait to confirm block is stuck before restart
   dry_run: false                  # simulate restarts only (-d)
 
   # Logging

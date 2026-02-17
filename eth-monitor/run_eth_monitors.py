@@ -29,6 +29,7 @@ CONFIG_TO_CLI = {
     "service": ("--service", None),
     "secondary_containers": ("--secondary-containers", None),
     "secondary_services": ("--secondary-services", None),
+    "stuck_check_interval": ("--stuck-check-interval", None),
     "container_logs": ("--container-logs", None),
     "host_log_dest": ("--host-log-dest", None),
     "service_log_lines": ("--service-log-lines", None),
