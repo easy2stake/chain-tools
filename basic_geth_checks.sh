@@ -119,23 +119,21 @@ perform_checks() {
   fi
 
   # Peer count check
-  log "\nChecking peer count..."
   timed_rpc '{"jsonrpc":"2.0","method":"net_peerCount","params": [],"id":1}'
+  log "\nChecking peer count... (took ${RPC_ELAPSED}s)"
   if [ -z "$RPC_RESULT" ] || [ "$RPC_RESULT" == "null" ]; then
     echo "[ERROR] Failed to retrieve peer count"
   else
-    echo "$RPC_RESULT" | jq .
-    echo "(took ${RPC_ELAPSED}s)"
+    echo "$RPC_RESULT"
   fi
 
   # Sync status check
-  log "\n\nChecking sync status..."
   timed_rpc '{"jsonrpc":"2.0","method":"eth_syncing","params": [],"id":1}'
+  log "\n\nChecking sync status... (took ${RPC_ELAPSED}s)"
   if [ -z "$RPC_RESULT" ] || [ "$RPC_RESULT" == "null" ]; then
     echo "[ERROR] Failed to retrieve sync status"
   else
-    echo "$RPC_RESULT" | jq .
-    echo "(took ${RPC_ELAPSED}s)"
+    echo "$RPC_RESULT"
   fi
 
   # Block checks: latest, safe, finalized, earliest
