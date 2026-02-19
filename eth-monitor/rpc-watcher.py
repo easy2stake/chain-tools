@@ -653,8 +653,23 @@ class ChainMonitor:
                             )
                 else:
                     self._log(f"ERROR [{HOSTNAME}]: Failed to fetch latest block")
+                    # Build detailed message with chain info
+                    chain_info_parts = []
+                    if self.chain_id is not None:
+                        chain_info_parts.append(f"Chain ID: {self.chain_id}")
+                        if self.chain_short_name:
+                            chain_info_parts[-1] += f" ({self.chain_short_name})"
+                    chain_name = self.cfg.get('name', 'unknown')
+                    chain_info_parts.append(f"Chain: {chain_name}")
+                    container = self.cfg.get('container')
+                    service = self.cfg.get('service')
+                    if container:
+                        chain_info_parts.append(f"Container: {container}")
+                    elif service:
+                        chain_info_parts.append(f"Service: {service}")
+                    chain_info = " | ".join(chain_info_parts)
                     self._send_telegram(
-                        f"⚠️ <b>eth-monitor</b>: Failed to fetch latest block from {self.cfg['url']} | Host: {HOSTNAME}"
+                        f"⚠️ <b>eth-monitor</b>: Failed to fetch latest block from {self.cfg['url']} | {chain_info} | Host: {HOSTNAME}"
                     )
 
                 shutdown.wait(timeout=interval)

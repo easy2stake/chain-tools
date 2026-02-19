@@ -792,7 +792,25 @@ monitor_loop() {
       fi
     else
       log "ERROR [${MONITOR_HOSTNAME}]: Failed to fetch latest block"
-      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RPC_URL | Host: ${MONITOR_HOSTNAME}"
+      # Build detailed message with chain info
+      chain_info_parts=()
+      if [ -n "$CHAIN_ID" ]; then
+        if [ -n "$CHAIN_SHORT_NAME" ]; then
+          chain_info_parts+=("Chain ID: ${CHAIN_ID} (${CHAIN_SHORT_NAME})")
+        else
+          chain_info_parts+=("Chain ID: ${CHAIN_ID}")
+        fi
+      fi
+      if [ -n "$DOCKER_CONTAINER" ]; then
+        chain_info_parts+=("Container: ${DOCKER_CONTAINER}")
+      elif [ -n "$SERVICE_NAME" ]; then
+        chain_info_parts+=("Service: ${SERVICE_NAME}")
+      fi
+      chain_info=""
+      if [ ${#chain_info_parts[@]} -gt 0 ]; then
+        chain_info=" | $(IFS=' | '; echo "${chain_info_parts[*]}")"
+      fi
+      send_telegram_message "⚠️ <b>eth-monitor</b>: Failed to fetch latest block from $RPC_URL${chain_info} | Host: ${MONITOR_HOSTNAME}"
     fi
     
     # Sleep for the specified interval
