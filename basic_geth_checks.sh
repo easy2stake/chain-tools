@@ -107,15 +107,15 @@ timestamp_to_utc() {
 # Function to perform all checks
 perform_checks() {
   # Print Chain ID first
-  log "\nFetching chain ID..."
   timed_rpc '{"jsonrpc":"2.0","method":"eth_chainId","params": [],"id":1}'
+  log "\nFetching chain ID... (took ${RPC_ELAPSED}s)"
   chain_id=$(echo "$RPC_RESULT" | jq -r ".result")
   if [ -z "$chain_id" ] || [ "$chain_id" == "null" ]; then
     echo "[ERROR] Failed to retrieve chain ID"
   else
     chain_id_int=$(safe_hex_to_dec "$chain_id")
     echo "Chain ID (Hex): $chain_id"
-    echo "Chain ID (Int): $chain_id_int (took ${RPC_ELAPSED}s)"
+    echo "Chain ID (Int): $chain_id_int"
   fi
 
   # Peer count check
@@ -138,10 +138,10 @@ perform_checks() {
 
   # Block checks: latest, safe, finalized, earliest
   for block_type in "latest" "safe" "finalized" "earliest"; do
-    log "\n\nChecking $block_type block..."
     block_output=$(get_block_data "$block_type")
     block_elapsed=$(echo "$block_output" | head -1 | sed 's/ELAPSED://')
     block_data=$(echo "$block_output" | tail -n +2)
+    log "\n\nChecking $block_type block... (took ${block_elapsed}s)"
 
     block_number_hex=$(extract_field "$block_data" "number")
     if [ -z "$block_number_hex" ]; then
@@ -156,7 +156,7 @@ perform_checks() {
       echo "${block_type^} Block Number (Hex): $block_number_hex"
       echo "${block_type^} Block Number (Int): $block_number_int"
       echo "${block_type^} Block Hash: $block_hash"
-      echo "${block_type^} Block Timestamp: $timestamp_utc (took ${block_elapsed}s)"
+      echo "${block_type^} Block Timestamp: $timestamp_utc"
     fi
   done
 }
@@ -168,10 +168,10 @@ check_block_by_number() {
     block_number=$(safe_dec_to_hex "$block_number")
   fi
 
-  log "\nChecking block number: $block_number..."
   block_output=$(get_block_data "$block_number")
   block_elapsed=$(echo "$block_output" | head -1 | sed 's/ELAPSED://')
   block_data=$(echo "$block_output" | tail -n +2)
+  log "\nChecking block number: $block_number... (took ${block_elapsed}s)"
 
   block_number_hex=$(extract_field "$block_data" "number")
   if [ -z "$block_number_hex" ]; then
@@ -186,7 +186,7 @@ check_block_by_number() {
     echo "Block Number (Hex): $block_number_hex"
     echo "Block Number (Int): $block_number_int"
     echo "Block Hash: $block_hash"
-    echo "Block Timestamp: $timestamp_utc (took ${block_elapsed}s)"
+    echo "Block Timestamp: $timestamp_utc"
   fi
 }
 
@@ -197,15 +197,14 @@ get_block() {
     block_number=$(safe_dec_to_hex "$block_number")
   fi
 
-  log "\nFetching full block content for block number: $block_number..."
   block_output=$(get_block_data "$block_number")
   block_elapsed=$(echo "$block_output" | head -1 | sed 's/ELAPSED://')
   block_data=$(echo "$block_output" | tail -n +2)
+  log "\nFetching full block content for block number: $block_number... (took ${block_elapsed}s)"
   if [ -z "$block_data" ]; then
     echo "[ERROR] Failed to retrieve block content for block number: $block_number"
   else
     echo "$block_data" | jq
-    echo "(took ${block_elapsed}s)"
   fi
 }
 
@@ -213,15 +212,14 @@ get_block() {
 get_transaction_by_hash() {
   tx_hash=$1
 
-  log "\nFetching transaction details for hash: $tx_hash..."
   timed_rpc '{"jsonrpc":"2.0","method":"eth_getTransactionByHash","params": ["'"$tx_hash"'"],"id":1}'
+  log "\nFetching transaction details for hash: $tx_hash... (took ${RPC_ELAPSED}s)"
   tx_data="$RPC_RESULT"
 
   if [ -z "$tx_data" ]; then
     echo "[ERROR] Failed to retrieve transaction details for hash: $tx_hash"
   else
     echo "$tx_data" | jq
-    echo "(took ${RPC_ELAPSED}s)"
   fi
 }
 
@@ -240,8 +238,8 @@ get_balance() {
     block_height=$(safe_dec_to_hex "$block_height")
   fi
 
-  log "\nFetching balance for account: $account at block height: $block_height..."
   timed_rpc '{"jsonrpc":"2.0","method":"eth_getBalance","params": ["'"$account"'", "'"$block_height"'"],"id":1}'
+  log "\nFetching balance for account: $account at block height: $block_height... (took ${RPC_ELAPSED}s)"
   balance_data="$RPC_RESULT"
 
   balance_hex=$(echo "$balance_data" | jq -r ".result")
@@ -258,24 +256,22 @@ get_balance() {
       printf "Balance (in ETH): %.4f\n" "$balance_eth"
     fi
     echo "Balance (in Wei): $balance_wei"
-    echo "(took ${RPC_ELAPSED}s)"
   fi
 }
 
 # New function to extract consensus layer PRYSM peers
 get_prysm_peers() {
-  log "\nFetching PRYSM peers from consensus layer..."
   local start end
   start=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
   peers=$(curl -s "$URL/eth/v1/node/peers" | jq -r '.data[].enr')
   end=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
   RPC_ELAPSED=$(echo "$end - $start" | bc -l 2>/dev/null || echo "0")
+  log "\nFetching PRYSM peers from consensus layer... (took ${RPC_ELAPSED}s)"
   if [ -z "$peers" ]; then
     echo "[ERROR] No peers found or error retrieving peers."
   else
     echo "PRYSM Peers:"
     echo "$peers"
-    echo "(took ${RPC_ELAPSED}s)"
   fi
 }
 
