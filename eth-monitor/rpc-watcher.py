@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -301,8 +302,91 @@ class ChainMonitor:
                 f"🔄 <b>eth-monitor</b>: Detected external restart of {target_type} <b>{target_name}</b>. "
                 f"Cooldown applied ({cooldown}s). | Host: {HOSTNAME}"
             )
+            # Check for OOM errors in dmesg
+            oom_result = self._check_oom_in_dmesg()
+            if oom_result:
+                full_output, summary_lines = oom_result
+                # Log complete OOM output to log file
+                self._log("OOM detected in dmesg:")
+                for line in full_output.splitlines():
+                    self._log(f"  {line}")
+                # Send concise summary to Telegram
+                oom_summary = self._parse_oom_summary(summary_lines)
+                if oom_summary:
+                    self._send_telegram(
+                        f"⚠️ <b>OOM detected</b>: {oom_summary} | Target: {target_name} | Host: {HOSTNAME}"
+                    )
         elif current_started_at > self.last_restart_time:
             self.last_restart_time = current_started_at
+
+    def _check_oom_in_dmesg(self) -> tuple[str, list[str]] | None:
+        """Check dmesg for OOM errors. Returns (full_output, summary_lines) if found, None otherwise."""
+        try:
+            r = subprocess.run(
+                ["dmesg", "-T", "--since", "30m ago"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if r.returncode != 0:
+                return None
+
+            # Filter for OOM-related lines (case-insensitive)
+            oom_lines = []
+            for line in r.stdout.splitlines():
+                if "oom" in line.lower():
+                    oom_lines.append(line)
+
+            if not oom_lines:
+                return None
+
+            full_output = "\n".join(oom_lines)
+            # Extract key "Out of memory: Killed process" lines for Telegram summary
+            summary_lines = [line for line in oom_lines if "Out of memory: Killed process" in line]
+
+            return (full_output, summary_lines)
+        except (subprocess.TimeoutExpired, OSError, Exception) as e:
+            self._log(f"WARN: Failed to check dmesg for OOM: {e}")
+            return None
+
+    def _parse_oom_summary(self, summary_lines: list[str]) -> str:
+        """Parse OOM summary lines and extract key info for Telegram message."""
+        if not summary_lines:
+            return ""
+
+        # Take the most recent OOM kill (last line)
+        line = summary_lines[-1]
+
+        # Extract process name and PID from pattern like:
+        # "Out of memory: Killed process 3874404 (base-reth-node) total-vm:..."
+        match = re.search(r"Killed process (\d+) \(([^)]+)\)", line)
+        if match:
+            pid = match.group(1)
+            process_name = match.group(2)
+        else:
+            pid = "unknown"
+            process_name = "unknown"
+
+        # Extract anon-rss (actual RAM used)
+        rss_match = re.search(r"anon-rss:(\d+)kB", line)
+        anon_rss = rss_match.group(1) if rss_match else "unknown"
+
+        # Format memory nicely (convert KB to GB if large)
+        try:
+            rss_kb = int(anon_rss)
+            if rss_kb >= 1024 * 1024:  # >= 1GB
+                rss_display = f"{rss_kb / (1024 * 1024):.1f}GB"
+            elif rss_kb >= 1024:  # >= 1MB
+                rss_display = f"{rss_kb / 1024:.1f}MB"
+            else:
+                rss_display = f"{rss_kb}KB"
+        except ValueError:
+            rss_display = f"{anon_rss}KB"
+
+        count = len(summary_lines)
+        count_text = f" ({count} kill{'s' if count > 1 else ''})" if count > 1 else ""
+
+        return f"Killed process {pid} ({process_name}) | Memory: {rss_display}{count_text}"
 
     def _copy_container_docker_logs(self, container: str, host_dest: str) -> None:
         lines = self.cfg.get("container_log_lines", 5000)
