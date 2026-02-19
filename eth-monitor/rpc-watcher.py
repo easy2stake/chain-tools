@@ -532,8 +532,7 @@ class ChainMonitor:
         if self.chain_id:
             chain_line = f"\n<b>Chain ID:</b> {self.chain_id}" + (f" ({self.chain_short_name})" if self.chain_short_name else "")
         msg = (
-            f"🟢 <b>eth-monitor started</b>{dry}\n"
-            f"<b>Host:</b> {HOSTNAME}\n"
+            f"🟢 <b>{HOSTNAME} - rpcwatcher - started</b>{dry}\n"
             f"<b>RPC:</b> {self.cfg['url']}{chain_line}\n"
             f"<b>Interval:</b> {self.cfg.get('interval', 10)}s · <b>Threshold:</b> {self.cfg.get('threshold', 120)}s\n"
             f"<b>Target:</b> {target}\n"
