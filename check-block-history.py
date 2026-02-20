@@ -179,18 +179,36 @@ def _eth_get_logs_by_block_hash(block_hash: str):
 
 def logs_work_at_block(block_num: int) -> bool:
     """Check if eth_getLogs works at this block (uses blockHash per EIP-234; pruned blocks return error)."""
+    works, _ = logs_probe_at_block(block_num)
+    return works
+
+
+def logs_probe_at_block(block_num: int) -> tuple[bool, bool]:
+    """Probe eth_getLogs at block. Returns (works, has_data); has_data means result was non-empty."""
     result = rpc("eth_getBlockByNumber", hex(block_num), False)
     if not result or "hash" not in result:
-        return False
+        return (False, False)
     block_hash = result["hash"]
     logs_result, err = _eth_get_logs_by_block_hash(block_hash)
-    return logs_result is not None
+    if logs_result is None:
+        return (False, False)
+    has_data = isinstance(logs_result, list) and len(logs_result) > 0
+    return (True, has_data)
 
 
 def block_receipts_work_at_block(block_num: int) -> bool:
     """Check if eth_getBlockReceipts works at this block."""
+    works, _ = receipts_probe_at_block(block_num)
+    return works
+
+
+def receipts_probe_at_block(block_num: int) -> tuple[bool, bool]:
+    """Probe eth_getBlockReceipts at block. Returns (works, has_data); has_data means result was non-empty."""
     result = rpc("eth_getBlockReceipts", hex(block_num))
-    return result is not None
+    if result is None:
+        return (False, False)
+    has_data = isinstance(result, list) and len(result) > 0
+    return (True, has_data)
 
 
 def get_tx_from_block_or_nearby(
@@ -378,7 +396,10 @@ def main() -> None:
     print("      Info: eth_getLogs (blockHash) and eth_getBlockReceipts; may issue many RPC calls.")
     logs_earliest = "N/A"
     receipts_earliest = "N/A"
+    logs_first_with_data: Optional[int] = None
+    receipts_first_with_data: Optional[int] = None
     lr_iterations = 0
+    _MAX_SCAN_BLOCKS = 300  # cap scan for "first block with non-empty" to limit RPCs
 
     # If logs/receipts don't work at current block, method may be unsupported — skip binary search
     if not logs_work_at_block(current_dec):
@@ -397,9 +418,24 @@ def main() -> None:
         logs_earliest = low
         if logs_earliest == 1 or (earliest_block == 1 and logs_earliest <= 1000):
             logs_earliest = 1
+        # Find a block where we got non-empty logs (scan from current down, cap at _MAX_SCAN_BLOCKS)
+        logs_lo = logs_earliest if isinstance(logs_earliest, int) else 0
+        for b in range(current_dec, max(logs_lo - 1, current_dec - _MAX_SCAN_BLOCKS), -1):
+            lr_iterations += 1
+            works, has_data = logs_probe_at_block(b)
+            if works and has_data:
+                logs_first_with_data = b
+                break
+        if logs_earliest == 1:
             print(f"      {GREEN}✓ Full log index from block 1 (eth_getLogs works for entire chain){NC}")
         else:
             print(f"      {YELLOW}Log index (eth_getLogs) available from block ~{logs_earliest}{NC}")
+        if logs_first_with_data is not None:
+            print(f"        First block with logs in our check: {logs_first_with_data}")
+            if logs_first_with_data > logs_lo:
+                print(f"        Blocks ~{logs_earliest} to {logs_first_with_data - 1} returned [] only")
+        else:
+            print(f"        All probed blocks in [~{logs_earliest}, {current_dec}] returned [] only")
 
     if not block_receipts_work_at_block(current_dec):
         lr_iterations += 1
@@ -417,9 +453,24 @@ def main() -> None:
         receipts_earliest = low
         if receipts_earliest == 1 or (earliest_block == 1 and receipts_earliest <= 1000):
             receipts_earliest = 1
+        # Find a block where we got non-empty receipts (scan from current down, cap at _MAX_SCAN_BLOCKS)
+        receipts_lo = receipts_earliest if isinstance(receipts_earliest, int) else 0
+        for b in range(current_dec, max(receipts_lo - 1, current_dec - _MAX_SCAN_BLOCKS), -1):
+            lr_iterations += 1
+            works, has_data = receipts_probe_at_block(b)
+            if works and has_data:
+                receipts_first_with_data = b
+                break
+        if receipts_earliest == 1:
             print(f"      {GREEN}✓ Full block receipts from block 1 (eth_getBlockReceipts works for entire chain){NC}")
         else:
             print(f"      {YELLOW}Block receipts (eth_getBlockReceipts) available from block ~{receipts_earliest}{NC}")
+        if receipts_first_with_data is not None:
+            print(f"        First block with receipts in our check: {receipts_first_with_data}")
+            if receipts_first_with_data > receipts_lo:
+                print(f"        Blocks ~{receipts_earliest} to {receipts_first_with_data - 1} returned [] only")
+        else:
+            print(f"        All probed blocks in [~{receipts_earliest}, {current_dec}] returned [] only")
 
     print(f"      (used ~{lr_iterations} queries)")
     print()
@@ -464,6 +515,15 @@ def main() -> None:
         print(
             f"{YELLOW}Partial - from block ~{logs_earliest} ({logs_blocks:,} blocks, older logs not queryable){NC}"
         )
+    if isinstance(logs_earliest, int):
+        if logs_first_with_data is not None:
+            print(f"  First block with logs: {logs_first_with_data}", end="")
+            if logs_first_with_data > logs_earliest:
+                print(f"; blocks ~{logs_earliest}–{logs_first_with_data - 1} returned [] only")
+            else:
+                print()
+        else:
+            print(f"  All probed blocks returned [] only")
     print("Block receipts:        ", end="")
     if receipts_earliest == 1:
         print(f"{GREEN}✓ FULL (eth_getBlockReceipts works from block 1){NC}")
@@ -474,6 +534,15 @@ def main() -> None:
         print(
             f"{YELLOW}Partial - from block ~{receipts_earliest} ({receipts_blocks:,} blocks, older receipts not queryable){NC}"
         )
+    if isinstance(receipts_earliest, int):
+        if receipts_first_with_data is not None:
+            print(f"  First block with receipts: {receipts_first_with_data}", end="")
+            if receipts_first_with_data > receipts_earliest:
+                print(f"; blocks ~{receipts_earliest}–{receipts_first_with_data - 1} returned [] only")
+            else:
+                print()
+        else:
+            print(f"  All probed blocks returned [] only")
     print()
 
 
