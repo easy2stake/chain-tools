@@ -137,27 +137,40 @@ perform_checks() {
   fi
 
   # Block checks: latest, safe, finalized, earliest
-  for block_type in "latest" "safe" "finalized" "earliest"; do
+  declare -a BT_LABELS=("Latest" "Safe" "Finalized" "Earliest")
+  declare -a BT_KEYS=("latest" "safe" "finalized" "earliest")
+  declare -a BT_HEX BT_DEC BT_HASH BT_TIME BT_MS
+  for i in 0 1 2 3; do
+    block_type="${BT_KEYS[$i]}"
     block_output=$(get_block_data "$block_type")
     block_elapsed=$(echo "$block_output" | head -1 | sed 's/ELAPSED://')
     block_data=$(echo "$block_output" | tail -n +2)
-    log "\n\nChecking $block_type block... (took ${block_elapsed}s)"
+    req_ms=$(echo "scale=0; $block_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "0")
 
     block_number_hex=$(extract_field "$block_data" "number")
-    if [ -z "$block_number_hex" ]; then
-      echo "[ERROR] Failed to retrieve block number for $block_type block"
+    if [ -z "$block_number_hex" ] || [ "$block_number_hex" == "null" ]; then
+      BT_HEX[$i]="null"
+      BT_DEC[$i]="0"
+      BT_HASH[$i]="null"
+      BT_TIME[$i]="1970-01-01T00:00:00Z"
     else
       block_number_int=$(safe_hex_to_dec "$block_number_hex")
       block_hash=$(extract_field "$block_data" "hash")
       timestamp_hex=$(extract_field "$block_data" "timestamp")
       timestamp=$(safe_hex_to_dec "$timestamp_hex")
-      timestamp_utc=$(timestamp_to_utc "$timestamp")
-
-      echo "${block_type^} Block Number (Hex): $block_number_hex"
-      echo "${block_type^} Block Number (Int): $block_number_int"
-      echo "${block_type^} Block Hash: $block_hash"
-      echo "${block_type^} Block Timestamp: $timestamp_utc"
+      BT_HEX[$i]="$block_number_hex"
+      BT_DEC[$i]="$block_number_int"
+      BT_HASH[$i]="${block_hash:-null}"
+      BT_TIME[$i]=$(timestamp_to_utc "$timestamp")
     fi
+    BT_MS[$i]="$req_ms"
+  done
+
+  log "\n"
+  printf "%-10s %-12s %-10s %-66s %-20s %s\n" "Row" "Block(hex)" "Block(dec)" "BlockHash" "BlockTime" "ReqTime(ms)"
+  printf "%-10s %-12s %-10s %-66s %-20s %s\n" "----------" "------------" "----------" "------------------------------------------------------------------" "--------------------" "----------"
+  for i in 0 1 2 3; do
+    printf "%-10s %-12s %-10s %-66s %-20s %s\n" "${BT_LABELS[$i]}" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_TIME[$i]}" "${BT_MS[$i]}"
   done
 }
 
