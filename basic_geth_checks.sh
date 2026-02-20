@@ -106,26 +106,31 @@ timestamp_to_utc() {
 
 # Function to perform all checks
 perform_checks() {
-  # Print Chain ID first
+  # Chain ID
   timed_rpc '{"jsonrpc":"2.0","method":"eth_chainId","params": [],"id":1}'
-  log "\nFetching chain ID... (took ${RPC_ELAPSED}s)"
+  chain_id_elapsed="$RPC_ELAPSED"
   chain_id=$(echo "$RPC_RESULT" | jq -r ".result")
-  if [ -z "$chain_id" ] || [ "$chain_id" == "null" ]; then
-    echo "[ERROR] Failed to retrieve chain ID"
-  else
+  chain_id_int="—"
+  if [ -n "$chain_id" ] && [ "$chain_id" != "null" ]; then
     chain_id_int=$(safe_hex_to_dec "$chain_id")
-    echo "Chain ID (Hex): $chain_id"
-    echo "Chain ID (Int): $chain_id_int"
   fi
 
-  # Peer count check
+  # Peer count
   timed_rpc '{"jsonrpc":"2.0","method":"net_peerCount","params": [],"id":1}'
-  log "\nChecking peer count... (took ${RPC_ELAPSED}s)"
-  if [ -z "$RPC_RESULT" ] || [ "$RPC_RESULT" == "null" ]; then
-    echo "[ERROR] Failed to retrieve peer count"
-  else
-    echo "$RPC_RESULT"
+  peers_elapsed="$RPC_ELAPSED"
+  peers_hex=$(echo "$RPC_RESULT" | jq -r ".result")
+  peers_int="—"
+  if [ -n "$peers_hex" ] && [ "$peers_hex" != "null" ]; then
+    peers_int=$(safe_hex_to_dec "$peers_hex")
   fi
+
+  # Header table: Chain ID and Peers
+  chain_id_ms=$(echo "scale=0; $chain_id_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "0")
+  peers_ms=$(echo "scale=0; $peers_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "0")
+  log "\n"
+  printf "%-16s %-14s %-8s %-18s\n" "Chain ID (hex)" "Chain ID (int)" "Peers" "ReqTime(ms)"
+  printf "%-16s %-14s %-8s %-18s\n" "----------------" "--------------" "--------" "------------------"
+  printf "%-16s %-14s %-8s %-18s\n" "${chain_id:-[ERROR]}" "${chain_id_int}" "${peers_int}" "chain:${chain_id_ms} peers:${peers_ms}"
 
   # Sync status check
   timed_rpc '{"jsonrpc":"2.0","method":"eth_syncing","params": [],"id":1}'
