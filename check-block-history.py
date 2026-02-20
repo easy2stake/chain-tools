@@ -394,6 +394,7 @@ def main() -> None:
     # 4. Log index + block receipts
     print(f"{CYAN}[4/5]{NC} Checking log index and block receipts (binary search)...")
     print("      Info: eth_getLogs (blockHash) and eth_getBlockReceipts; may issue many RPC calls.")
+    print("      Block-with-data / Block-with-[]-only: sampled blocks we probed (not chain-wide boundaries).")
     logs_earliest = "N/A"
     receipts_earliest = "N/A"
     logs_first_with_data: Optional[int] = None
@@ -477,6 +478,7 @@ def main() -> None:
     # 5. Summary
     print(f"{CYAN}[5/5]{NC} Summary")
     print(f"{CYAN}=== Summary ==={NC}")
+    print("(Log/receipt 'block with data' and 'block with [] only' = sampled blocks we probed, not boundaries)")
     eb = earliest_block or 1
     block_count = current_dec - eb + 1
     print(f"Block range:          {eb} → {current_dec} ({block_count:,} blocks)")
