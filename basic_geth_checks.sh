@@ -172,10 +172,10 @@ perform_checks() {
   done
 
   log "\n"
-  printf "%-10s %-12s %-10s %-66s %-20s %s\n" "Row" "Block(hex)" "Block(dec)" "BlockHash" "BlockTime" "ReqTime(ms)"
-  printf "%-10s %-12s %-10s %-66s %-20s %s\n" "----------" "------------" "----------" "------------------------------------------------------------------" "--------------------" "----------"
+  printf "%-10s %-20s %-12s %-10s %-66s %s\n" "Row" "BlockTime" "Block(hex)" "Block(dec)" "BlockHash" "ReqTime(ms)"
+  printf "%-10s %-20s %-12s %-10s %-66s %s\n" "----------" "--------------------" "------------" "----------" "------------------------------------------------------------------" "----------"
   for i in 0 1 2 3; do
-    printf "%-10s %-12s %-10s %-66s %-20s %s\n" "${BT_LABELS[$i]}" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_TIME[$i]}" "${BT_MS[$i]}"
+    printf "%-10s %-20s %-12s %-10s %-66s %s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
   done
 }
 
