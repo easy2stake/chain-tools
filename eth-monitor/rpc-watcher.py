@@ -451,18 +451,51 @@ class ChainMonitor:
 
     def _restart_secondary_targets(self) -> None:
         dry = self.cfg.get("dry_run", False)
+        restarted_containers: list[str] = []
+        failed_containers: list[str] = []
+        restarted_services: list[str] = []
+        failed_services: list[str] = []
+
         for c in self.cfg.get("secondary_containers") or []:
             if dry:
                 self._log(f"[DRY RUN] Would restart secondary container: {c}")
+                restarted_containers.append(c)
             else:
                 r = subprocess.run(["docker", "restart", c], capture_output=True, timeout=30)
-                self._log("Restarted secondary container: " + c if r.returncode == 0 else f"WARN: Failed to restart {c}")
+                if r.returncode == 0:
+                    self._log("Restarted secondary container: " + c)
+                    restarted_containers.append(c)
+                else:
+                    self._log(f"WARN: Failed to restart {c}")
+                    failed_containers.append(c)
+
         for s in self.cfg.get("secondary_services") or []:
             if dry:
                 self._log(f"[DRY RUN] Would restart secondary service: {s}")
+                restarted_services.append(s)
             else:
                 r = subprocess.run(["systemctl", "restart", s], capture_output=True, timeout=30)
-                self._log("Restarted secondary service: " + s if r.returncode == 0 else f"WARN: Failed to restart {s}")
+                if r.returncode == 0:
+                    self._log("Restarted secondary service: " + s)
+                    restarted_services.append(s)
+                else:
+                    self._log(f"WARN: Failed to restart {s}")
+                    failed_services.append(s)
+
+        if restarted_containers or restarted_services or failed_containers or failed_services:
+            parts = []
+            if restarted_containers:
+                parts.append(f"containers OK: {', '.join(restarted_containers)}")
+            if failed_containers:
+                parts.append(f"containers FAILED: {', '.join(failed_containers)}")
+            if restarted_services:
+                parts.append(f"services OK: {', '.join(restarted_services)}")
+            if failed_services:
+                parts.append(f"services FAILED: {', '.join(failed_services)}")
+            prefix = "[DRY RUN] " if dry else ""
+            self._send_telegram(
+                f"🔄 <b>eth-monitor</b>: {prefix}Secondary targets: {' | '.join(parts)} | Host: {HOSTNAME}"
+            )
 
     def _restart_container(self, container: str) -> bool:
         now = time.time()
@@ -611,6 +644,17 @@ class ChainMonitor:
         elif self.cfg.get("service"):
             target = f"Service: {self.cfg['service']}"
 
+        sec_c = self.cfg.get("secondary_containers") or []
+        sec_s = self.cfg.get("secondary_services") or []
+        secondary_line = ""
+        if sec_c or sec_s:
+            parts = []
+            if sec_c:
+                parts.append(f"containers: {', '.join(sec_c)}")
+            if sec_s:
+                parts.append(f"services: {', '.join(sec_s)}")
+            secondary_line = f"\n<b>Secondary:</b> {' | '.join(parts)}"
+
         dry = "\n<b>DRY RUN</b>" if self.cfg.get("dry_run") else ""
         chain_line = ""
         if self.chain_id:
@@ -619,7 +663,7 @@ class ChainMonitor:
             f"🟢 <b>{HOSTNAME} - rpcwatcher - started</b>{dry}\n"
             f"<b>RPC:</b> {self.cfg['url']}{chain_line}\n"
             f"<b>Interval:</b> {self.cfg.get('interval', 10)}s · <b>Threshold:</b> {self.cfg.get('threshold', 120)}s\n"
-            f"<b>Target:</b> {target}\n"
+            f"<b>Target:</b> {target}{secondary_line}\n"
             f"<b>Cooldown:</b> {self.cfg.get('restart_cooldown', 21600)}s · <b>Holdoff:</b> {holdoff}\n"
             f"<b>Log:</b> {self._log_file}"
         )
