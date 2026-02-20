@@ -6,7 +6,11 @@
 import argparse
 import json
 import sys
+import time
 from typing import Optional, Tuple
+
+# Per-method RPC timing (method -> list of response times in seconds)
+_rpc_timings: dict[str, list[float]] = {}
 
 try:
     import requests
@@ -80,14 +84,22 @@ if not RPC_URL.startswith(("http://", "https://")):
     RPC_URL = "http://" + RPC_URL
 
 
+def _record_rpc_time(method: str, elapsed_sec: float) -> None:
+    if method not in _rpc_timings:
+        _rpc_timings[method] = []
+    _rpc_timings[method].append(elapsed_sec)
+
+
 def rpc(method: str, *params) -> Optional[dict]:
     payload = {"jsonrpc": "2.0", "method": method, "params": list(params), "id": 1}
+    t0 = time.perf_counter()
     try:
         if VERBOSE:
             print(f"  {YELLOW}[RPC] → {method}{NC} {json.dumps(list(params))}")
         r = requests.post(RPC_URL, json=payload, timeout=TIMEOUT)
         r.raise_for_status()
         data = r.json()
+        _record_rpc_time(method, time.perf_counter() - t0)
         if VERBOSE:
             out = json.dumps(data)
             if len(out) > 200:
@@ -95,6 +107,7 @@ def rpc(method: str, *params) -> Optional[dict]:
             print(f"  {YELLOW}[RPC] ← {method}{NC} {out}")
         return data.get("result")
     except Exception as e:
+        _record_rpc_time(method, time.perf_counter() - t0)
         if VERBOSE:
             print(f"  {RED}[RPC] ✗ {method}{NC} {e}")
         return None
@@ -150,11 +163,13 @@ def _eth_get_logs_by_block_hash(block_hash: str):
     for params in ([filter_obj], filter_obj):
         payload = {"jsonrpc": "2.0", "method": "eth_getLogs", "params": params, "id": 1}
         try:
+            t0 = time.perf_counter()
             if VERBOSE:
                 print(f"  {YELLOW}[RPC] → eth_getLogs{NC} {json.dumps(params)}")
             resp = requests.post(RPC_URL, json=payload, timeout=TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
+            _record_rpc_time("eth_getLogs", time.perf_counter() - t0)
             if VERBOSE:
                 out = json.dumps(data)
                 if len(out) > 200:
@@ -169,6 +184,7 @@ def _eth_get_logs_by_block_hash(block_hash: str):
             if "cannot unmarshal array" not in msg and "invalid argument" not in msg.lower():
                 return (None, err)
         except Exception as e:
+            _record_rpc_time("eth_getLogs", time.perf_counter() - t0)
             if VERBOSE:
                 print(f"  {RED}[RPC] ✗ eth_getLogs{NC} {e}")
             last_error = {"message": str(e)}
@@ -537,6 +553,14 @@ def main() -> None:
         if receipts_last_empty is not None:
             print(f"  Block with [] only: {receipts_last_empty}")
     print()
+    # Average RPC response time by method
+    if _rpc_timings:
+        print(f"{CYAN}=== RPC avg response time (by method) ==={NC}")
+        for method in sorted(_rpc_timings.keys()):
+            times = _rpc_timings[method]
+            avg_ms = (sum(times) / len(times)) * 1000
+            print(f"  {method}: {avg_ms:.1f} ms avg ({len(times)} calls)")
+        print()
 
 
 if __name__ == "__main__":
