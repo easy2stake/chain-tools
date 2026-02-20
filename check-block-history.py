@@ -26,9 +26,9 @@ def parse_args() -> argparse.Namespace:
     script = sys.argv[0].split("/")[-1]
     parser = argparse.ArgumentParser(
         prog=script,
-        description="Fast block history, tx indexer, and archival state checker for any EVM-compatible chain. "
+        description="Fast block history, tx indexer, archival state, log index, and block receipts checker for any EVM-compatible chain. "
         "Uses binary search to minimize RPC round trips. "
-        "Tests: block history, tx index (eth_getTransactionByHash), archival state (eth_getBalance).",
+        "Tests: block history, tx index (eth_getTransactionByHash), archival (eth_getBalance), log index (eth_getLogs), block receipts (eth_getBlockReceipts).",
         epilog="""Flow:
   [1] Get current block (eth_blockNumber)
        |
@@ -36,13 +36,13 @@ def parse_args() -> argparse.Namespace:
   [2] Binary search: earliest block (eth_getBlockByNumber)
        |
        v
-  [3] Binary search: tx indexer boundary (eth_getTransactionByHash)
+  [3] Binary search: tx indexer + archival (eth_getTransactionByHash, eth_getBalance)
        |
        v
-  [4] Binary search: archival boundary (eth_getBalance at historical block)
+  [4] Binary search: log index + block receipts (eth_getLogs, eth_getBlockReceipts)
        |
        v
-  Summary
+  [5] Summary
 
 Examples:
   %(prog)s http://localhost:8545
@@ -142,6 +142,23 @@ def archival_balance_works(address: str, block_num: int) -> bool:
     return result is not None
 
 
+def logs_work_at_block(block_num: int) -> bool:
+    """Check if eth_getLogs works at this block (uses blockHash per EIP-234; pruned blocks return error)."""
+    result = rpc("eth_getBlockByNumber", hex(block_num), False)
+    if not result or "hash" not in result:
+        return False
+    block_hash = result["hash"]
+    # eth_getLogs with blockHash only; result is list (possibly empty), error => None from rpc()
+    logs_result = rpc("eth_getLogs", [{"blockHash": block_hash}])
+    return logs_result is not None
+
+
+def block_receipts_work_at_block(block_num: int) -> bool:
+    """Check if eth_getBlockReceipts works at this block."""
+    result = rpc("eth_getBlockReceipts", hex(block_num))
+    return result is not None
+
+
 def get_tx_from_block_or_nearby(
     block: int, radius: int, current_dec: int
 ) -> Optional[tuple[int, str]]:
@@ -166,7 +183,7 @@ def main() -> None:
     print()
 
     # 1. Get current block
-    print(f"{CYAN}[1/4]{NC} Fetching current block...")
+    print(f"{CYAN}[1/5]{NC} Fetching current block...")
     current_block = rpc("eth_blockNumber")
     if current_block is None:
         print(f"{RED}ERROR: Cannot connect to RPC or get block number{NC}")
@@ -176,7 +193,7 @@ def main() -> None:
     print()
 
     # 2. Binary search for earliest available block
-    print(f"{CYAN}[2/4]{NC} Checking block history (binary search)...")
+    print(f"{CYAN}[2/5]{NC} Checking block history (binary search)...")
     print("      Info: Binary search over block range; may issue many eth_getBlockByNumber calls for large chains.")
     low, high = 1, current_dec
     iterations = 0
@@ -234,7 +251,7 @@ def main() -> None:
     print()
 
     # 3. Tx indexer + archival check
-    print(f"{CYAN}[3/4]{NC} Checking tx indexer and archival state (binary search)...")
+    print(f"{CYAN}[3/5]{NC} Checking tx indexer and archival state (binary search)...")
     print("      Info: Running tx indexer and archival binary searches; may issue many RPC calls for large chains.")
     tx_iterations = 0
     tx_indexer_earliest = "N/A"
@@ -322,8 +339,59 @@ def main() -> None:
     print(f"      (used ~{tx_iterations} queries)")
     print()
 
-    # 4. Summary
-    print(f"{CYAN}[4/4]{NC} Summary")
+    # 4. Log index + block receipts
+    print(f"{CYAN}[4/5]{NC} Checking log index and block receipts (binary search)...")
+    print("      Info: eth_getLogs (blockHash) and eth_getBlockReceipts; may issue many RPC calls.")
+    logs_earliest = "N/A"
+    receipts_earliest = "N/A"
+    lr_iterations = 0
+
+    # If logs/receipts don't work at current block, method may be unsupported — skip binary search
+    if not logs_work_at_block(current_dec):
+        lr_iterations += 1
+        print(f"      {YELLOW}eth_getLogs at latest block failed (unsupported or pruned) — skipping log index search{NC}")
+    else:
+        lr_iterations += 1
+        low, high = earliest_block, current_dec
+        while low < high:
+            mid = (low + high) // 2
+            lr_iterations += 1
+            if logs_work_at_block(mid):
+                high = mid
+            else:
+                low = mid + 1
+        logs_earliest = low
+        if logs_earliest == 1 or (earliest_block == 1 and logs_earliest <= 1000):
+            logs_earliest = 1
+            print(f"      {GREEN}✓ Full log index from block 1 (eth_getLogs works for entire chain){NC}")
+        else:
+            print(f"      {YELLOW}Log index (eth_getLogs) available from block ~{logs_earliest}{NC}")
+
+    if not block_receipts_work_at_block(current_dec):
+        lr_iterations += 1
+        print(f"      {YELLOW}eth_getBlockReceipts at latest block failed (unsupported or pruned) — skipping receipts search{NC}")
+    else:
+        lr_iterations += 1
+        low, high = earliest_block, current_dec
+        while low < high:
+            mid = (low + high) // 2
+            lr_iterations += 1
+            if block_receipts_work_at_block(mid):
+                high = mid
+            else:
+                low = mid + 1
+        receipts_earliest = low
+        if receipts_earliest == 1 or (earliest_block == 1 and receipts_earliest <= 1000):
+            receipts_earliest = 1
+            print(f"      {GREEN}✓ Full block receipts from block 1 (eth_getBlockReceipts works for entire chain){NC}")
+        else:
+            print(f"      {YELLOW}Block receipts (eth_getBlockReceipts) available from block ~{receipts_earliest}{NC}")
+
+    print(f"      (used ~{lr_iterations} queries)")
+    print()
+
+    # 5. Summary
+    print(f"{CYAN}[5/5]{NC} Summary")
     print(f"{CYAN}=== Summary ==={NC}")
     eb = earliest_block or 1
     block_count = current_dec - eb + 1
@@ -351,6 +419,26 @@ def main() -> None:
         archival_blocks = current_dec - archival_earliest
         print(
             f"{YELLOW}Partial - from block ~{archival_earliest} ({archival_blocks:,} blocks with archival state, older state not queryable){NC}"
+        )
+    print("Log index:             ", end="")
+    if logs_earliest == 1:
+        print(f"{GREEN}✓ FULL (eth_getLogs works from block 1){NC}")
+    elif logs_earliest == "N/A":
+        print(f"{YELLOW}N/A (could not verify){NC}")
+    else:
+        logs_blocks = current_dec - logs_earliest
+        print(
+            f"{YELLOW}Partial - from block ~{logs_earliest} ({logs_blocks:,} blocks, older logs not queryable){NC}"
+        )
+    print("Block receipts:        ", end="")
+    if receipts_earliest == 1:
+        print(f"{GREEN}✓ FULL (eth_getBlockReceipts works from block 1){NC}")
+    elif receipts_earliest == "N/A":
+        print(f"{YELLOW}N/A (could not verify){NC}")
+    else:
+        receipts_blocks = current_dec - receipts_earliest
+        print(
+            f"{YELLOW}Partial - from block ~{receipts_earliest} ({receipts_blocks:,} blocks, older receipts not queryable){NC}"
         )
     print()
 
