@@ -142,14 +142,48 @@ def archival_balance_works(address: str, block_num: int) -> bool:
     return result is not None
 
 
+def _eth_get_logs_by_block_hash(block_hash: str):
+    """Call eth_getLogs with blockHash filter. Returns (result, error) from response.
+    Tries params as array [filter] first; if node returns 'cannot unmarshal array', retries with params as object."""
+    filter_obj = {"blockHash": block_hash}
+    last_error = None
+    for params in ([filter_obj], filter_obj):
+        payload = {"jsonrpc": "2.0", "method": "eth_getLogs", "params": params, "id": 1}
+        try:
+            if VERBOSE:
+                print(f"  {YELLOW}[RPC] → eth_getLogs{NC} {json.dumps(params)}")
+            resp = requests.post(RPC_URL, json=payload, timeout=TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            if VERBOSE:
+                out = json.dumps(data)
+                if len(out) > 200:
+                    out = out[:200] + "..."
+                print(f"  {YELLOW}[RPC] ← eth_getLogs{NC} {out}")
+            err = data.get("error")
+            if err is None:
+                return (data.get("result"), None)
+            last_error = err
+            # Retry with params as object when node expects filter object not array
+            msg = (err.get("message") or "") if isinstance(err, dict) else str(err)
+            if "cannot unmarshal array" not in msg and "invalid argument" not in msg.lower():
+                return (None, err)
+        except Exception as e:
+            if VERBOSE:
+                print(f"  {RED}[RPC] ✗ eth_getLogs{NC} {e}")
+            last_error = {"message": str(e)}
+            if params is filter_obj:
+                break
+    return (None, last_error)
+
+
 def logs_work_at_block(block_num: int) -> bool:
     """Check if eth_getLogs works at this block (uses blockHash per EIP-234; pruned blocks return error)."""
     result = rpc("eth_getBlockByNumber", hex(block_num), False)
     if not result or "hash" not in result:
         return False
     block_hash = result["hash"]
-    # eth_getLogs with blockHash only; result is list (possibly empty), error => None from rpc()
-    logs_result = rpc("eth_getLogs", [{"blockHash": block_hash}])
+    logs_result, err = _eth_get_logs_by_block_hash(block_hash)
     return logs_result is not None
 
 
