@@ -104,6 +104,24 @@ timestamp_to_utc() {
   date -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+# Function to format block age (current time - block time)
+format_age() {
+  block_ts=$1
+  [ -z "$block_ts" ] || [ "$block_ts" = "0" ] && echo "—" && return
+  now=$(date +%s 2>/dev/null || echo "0")
+  age=$((now - block_ts))
+  [ "$age" -lt 0 ] && echo "—" && return
+  if [ "$age" -lt 60 ]; then
+    echo "${age}s"
+  elif [ "$age" -lt 3600 ]; then
+    echo "$((age/60))m $((age%60))s"
+  elif [ "$age" -lt 86400 ]; then
+    echo "$((age/3600))h $((age%3600/60))m"
+  else
+    echo "$((age/86400))d $((age%86400/3600))h"
+  fi
+}
+
 # Function to perform all checks
 perform_checks() {
   # Chain ID
@@ -144,7 +162,7 @@ perform_checks() {
   # Block checks: latest, safe, finalized, earliest
   declare -a BT_LABELS=("Latest" "Safe" "Finalized" "Earliest")
   declare -a BT_KEYS=("latest" "safe" "finalized" "earliest")
-  declare -a BT_HEX BT_DEC BT_HASH BT_TIME BT_MS
+  declare -a BT_HEX BT_DEC BT_HASH BT_TIME BT_TS BT_MS
   for i in 0 1 2 3; do
     block_type="${BT_KEYS[$i]}"
     block_output=$(get_block_data "$block_type")
@@ -158,6 +176,7 @@ perform_checks() {
       BT_DEC[$i]="0"
       BT_HASH[$i]="null"
       BT_TIME[$i]="1970-01-01T00:00:00Z"
+      BT_TS[$i]="0"
     else
       block_number_int=$(safe_hex_to_dec "$block_number_hex")
       block_hash=$(extract_field "$block_data" "hash")
@@ -167,15 +186,17 @@ perform_checks() {
       BT_DEC[$i]="$block_number_int"
       BT_HASH[$i]="${block_hash:-null}"
       BT_TIME[$i]=$(timestamp_to_utc "$timestamp")
+      BT_TS[$i]="$timestamp"
     fi
     BT_MS[$i]="$req_ms"
   done
 
   log "\n"
-  printf "%-10s %-20s %-12s %-10s %-66s %s\n" "Row" "BlockTime" "Block(hex)" "Block(dec)" "BlockHash" "ReqTime(ms)"
-  printf "%-10s %-20s %-12s %-10s %-66s %s\n" "----------" "--------------------" "------------" "----------" "------------------------------------------------------------------" "----------"
+  printf "%-10s %-20s %-10s %-12s %-10s %-66s %s\n" "Row" "BlockTime" "Block Age" "Block(hex)" "Block(dec)" "BlockHash" "ReqTime(ms)"
+  printf "%-10s %-20s %-10s %-12s %-10s %-66s %s\n" "----------" "--------------------" "----------" "------------" "----------" "------------------------------------------------------------------" "----------"
   for i in 0 1 2 3; do
-    printf "%-10s %-20s %-12s %-10s %-66s %s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
+    age=$(format_age "${BT_TS[$i]}")
+    printf "%-10s %-20s %-10s %-12s %-10s %-66s %s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "$age" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
   done
 }
 
