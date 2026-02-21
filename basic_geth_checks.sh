@@ -107,10 +107,10 @@ timestamp_to_utc() {
 # Function to format block age (current time - block time)
 format_age() {
   block_ts=$1
-  [ -z "$block_ts" ] || [ "$block_ts" = "0" ] && echo "—" && return
+  [ -z "$block_ts" ] || [ "$block_ts" = "0" ] && echo "-" && return
   now=$(date +%s 2>/dev/null || echo "0")
   age=$((now - block_ts))
-  [ "$age" -lt 0 ] && echo "—" && return
+  [ "$age" -lt 0 ] && echo "-" && return
   if [ "$age" -lt 60 ]; then
     echo "${age}s"
   elif [ "$age" -lt 3600 ]; then
@@ -128,7 +128,7 @@ perform_checks() {
   timed_rpc '{"jsonrpc":"2.0","method":"eth_chainId","params": [],"id":1}'
   chain_id_elapsed="$RPC_ELAPSED"
   chain_id=$(echo "$RPC_RESULT" | jq -r ".result")
-  chain_id_int="—"
+  chain_id_int="-"
   if [ -n "$chain_id" ] && [ "$chain_id" != "null" ]; then
     chain_id_int=$(safe_hex_to_dec "$chain_id")
   fi
@@ -137,7 +137,7 @@ perform_checks() {
   timed_rpc '{"jsonrpc":"2.0","method":"net_peerCount","params": [],"id":1}'
   peers_elapsed="$RPC_ELAPSED"
   peers_hex=$(echo "$RPC_RESULT" | jq -r ".result")
-  peers_int="—"
+  peers_int="-"
   if [ -n "$peers_hex" ] && [ "$peers_hex" != "null" ]; then
     peers_int=$(safe_hex_to_dec "$peers_hex")
   fi
@@ -192,11 +192,11 @@ perform_checks() {
   done
 
   log "\n"
-  printf "%-10s %-20s %-10s %-12s %-10s %-66s %s\n" "Row" "BlockTime" "Block Age" "Block(hex)" "Block(dec)" "BlockHash" "ReqTime(ms)"
-  printf "%-10s %-20s %-10s %-12s %-10s %-66s %s\n" "----------" "--------------------" "----------" "------------" "----------" "------------------------------------------------------------------" "----------"
+  printf "%-10s %-20s %-12s %-12s %-10s %-66s %-10s\n" "Row" "BlockTime" "Block Age" "Block(hex)" "Block(dec)" "BlockHash" "ReqTime(ms)"
+  printf "%-10s %-20s %-12s %-12s %-10s %-66s %-10s\n" "----------" "--------------------" "------------" "------------" "----------" "------------------------------------------------------------------" "----------"
   for i in 0 1 2 3; do
     age=$(format_age "${BT_TS[$i]}")
-    printf "%-10s %-20s %-10s %-12s %-10s %-66s %s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "$age" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
+    printf "%-10s %-20s %-12s %-12s %-10s %-66s %-10s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "$age" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
   done
 }
 
