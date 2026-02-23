@@ -104,6 +104,21 @@ timestamp_to_utc() {
   date -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+# Format seconds as human-readable duration (e.g. 125 -> "2m 5s")
+format_seconds() {
+  local sec=$1
+  [ -z "$sec" ] || [ "$sec" -le 0 ] && echo "0s" && return
+  if [ "$sec" -lt 60 ]; then
+    echo "${sec}s"
+  elif [ "$sec" -lt 3600 ]; then
+    echo "$((sec/60))m $((sec%60))s"
+  elif [ "$sec" -lt 86400 ]; then
+    echo "$((sec/3600))h $((sec%3600/60))m"
+  else
+    echo "$((sec/86400))d $((sec%86400/3600))h"
+  fi
+}
+
 # Function to format block age (current time - block time)
 format_age() {
   block_ts=$1
@@ -169,6 +184,67 @@ print_blocks_per_sec() {
   } | sort -n > "${RATE_FILE}.$$" && mv "${RATE_FILE}.$$" "$RATE_FILE"
 
   log "\nBlocks/sec: $bps"
+}
+
+# Time-to-sync estimate using block timestamps only (TS_delta / Date_delta logic).
+# Stores (wall_clock_ts, block_timestamp) samples. TS_delta/Date_delta = chain-sec per real-sec.
+# Time to sync = gap / (catch_up_rate - 1) where gap = now - block_ts.
+print_time_to_sync() {
+  local block_ts=$1
+  local endpoint=${2:-default}
+  local suffix=$(echo "$endpoint" | tr -c '[:alnum:]' '_')
+  local SYNC_FILE="/tmp/geth_sync_eta_${suffix}.tmp"
+  local now=$(date +%s)
+  local eta="-"
+  local window_sec=60
+  local min_date="" max_date="" ts_at_min="" ts_at_max=""
+
+  # Read existing (wall_clock, block_ts) samples, keep only from last 60s
+  if [ -f "$SYNC_FILE" ]; then
+    while read -r date_ts block_ts_val; do
+      [ -z "$date_ts" ] || [ -z "$block_ts_val" ] && continue
+      age=$((now - date_ts))
+      [ "$age" -gt "$window_sec" ] && continue
+      if [ -z "$min_date" ] || [ "$date_ts" -lt "$min_date" ]; then min_date=$date_ts; ts_at_min=$block_ts_val; fi
+      if [ -z "$max_date" ] || [ "$date_ts" -gt "$max_date" ]; then max_date=$date_ts; ts_at_max=$block_ts_val; fi
+    done < "$SYNC_FILE" 2>/dev/null
+  fi
+
+  # Include current sample
+  if [ -z "$min_date" ] || [ "$now" -lt "$min_date" ]; then min_date=$now; ts_at_min=$block_ts; fi
+  if [ -z "$max_date" ] || [ "$now" -gt "$max_date" ]; then max_date=$now; ts_at_max=$block_ts; fi
+
+  # gap = chain-seconds behind head; catch_up_rate = chain-sec gained per real-sec
+  local gap=$((now - block_ts))
+  if [ "$gap" -le 0 ]; then
+    eta="synced"
+  elif [ -n "$min_date" ] && [ -n "$max_date" ] && [ "$max_date" -gt "$min_date" ]; then
+    local date_delta=$((max_date - min_date))
+    local ts_delta=$((ts_at_max - ts_at_min))
+    if [ "$ts_delta" -gt 0 ] && [ "$date_delta" -gt 0 ]; then
+      local catch_up=$(echo "scale=6; $ts_delta / $date_delta" | bc -l 2>/dev/null)
+      if [ -n "$catch_up" ] && [ "$(echo "$catch_up > 1" | bc -l 2>/dev/null)" = "1" ]; then
+        local net_rate=$(echo "scale=6; $catch_up - 1" | bc -l 2>/dev/null)
+        local secs=$(echo "scale=0; $gap / $net_rate / 1" | bc -l 2>/dev/null)
+        eta=$(format_seconds "$secs")
+      else
+        eta="∞"
+      fi
+    fi
+  fi
+
+  # Append new sample and rewrite file with only samples from last 60s
+  {
+    if [ -f "$SYNC_FILE" ]; then
+      while read -r date_ts block_ts_val; do
+        [ -z "$date_ts" ] && continue
+        [ $((now - date_ts)) -le "$window_sec" ] && echo "$date_ts $block_ts_val"
+      done < "$SYNC_FILE" 2>/dev/null
+    fi
+    echo "$now $block_ts"
+  } | sort -n > "${SYNC_FILE}.$$" && mv "${SYNC_FILE}.$$" "$SYNC_FILE"
+
+  log "\nTime to sync: $eta"
 }
 
 # Function to perform all checks
@@ -249,6 +325,9 @@ perform_checks() {
   done
 
   print_blocks_per_sec "${BT_DEC[0]}" "$URL"
+  if [ -n "${BT_TS[0]}" ] && [ "${BT_TS[0]}" != "0" ]; then
+    print_time_to_sync "${BT_TS[0]}" "$URL"
+  fi
 }
 
 # Function to check a specific block by number
