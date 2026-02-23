@@ -449,6 +449,60 @@ class ChainMonitor:
             prefix = "[DRY RUN] " if self.cfg.get("dry_run") else ""
             self._log(f"{prefix}Successfully copied service journal to {dest_file}")
 
+    def _validate_secondary_targets(self) -> str | None:
+        """Validate existence of secondary containers and services at startup. Log results. Returns summary for Telegram."""
+        sec_c = self.cfg.get("secondary_containers") or []
+        sec_s = self.cfg.get("secondary_services") or []
+        if not sec_c and not sec_s:
+            return None
+
+        found_containers: list[str] = []
+        missing_containers: list[str] = []
+        found_services: list[str] = []
+        missing_services: list[str] = []
+
+        if sec_c:
+            r = subprocess.run(
+                ["docker", "ps", "-a", "--format", "{{.Names}}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            existing = set((r.stdout or "").splitlines()) if r.returncode == 0 else set()
+            for c in sec_c:
+                if c in existing:
+                    found_containers.append(c)
+                    self._log(f"Secondary container '{c}': found")
+                else:
+                    missing_containers.append(c)
+                    self._log(f"Secondary container '{c}': NOT FOUND")
+
+        if sec_s:
+            for s in sec_s:
+                r = subprocess.run(
+                    ["systemctl", "show", s],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if r.returncode == 0:
+                    found_services.append(s)
+                    self._log(f"Secondary service '{s}': found")
+                else:
+                    missing_services.append(s)
+                    self._log(f"Secondary service '{s}': NOT FOUND")
+
+        parts: list[str] = []
+        if found_containers:
+            parts.append(f"containers OK: {', '.join(found_containers)}")
+        if missing_containers:
+            parts.append(f"containers MISSING: {', '.join(missing_containers)}")
+        if found_services:
+            parts.append(f"services OK: {', '.join(found_services)}")
+        if missing_services:
+            parts.append(f"services MISSING: {', '.join(missing_services)}")
+
+        return " | ".join(parts)
+
     def _restart_secondary_targets(self) -> None:
         dry = self.cfg.get("dry_run", False)
         restarted_containers: list[str] = []
@@ -627,7 +681,7 @@ class ChainMonitor:
         self._log("RPC endpoint validated successfully")
         return True
 
-    def _send_telegram_startup(self) -> None:
+    def _send_telegram_startup(self, secondary_validation: str | None = None) -> None:
         holdoff = "—"
         if self.cfg.get("container") or self.cfg.get("service"):
             now = time.time()
@@ -654,6 +708,9 @@ class ChainMonitor:
             if sec_s:
                 parts.append(f"services: {', '.join(sec_s)}")
             secondary_line = f"\n<b>Secondary:</b> {' | '.join(parts)}"
+            if secondary_validation:
+                status = " (nok)" if "MISSING" in secondary_validation else " (ok)"
+                secondary_line += status
 
         dry = "\n<b>DRY RUN</b>" if self.cfg.get("dry_run") else ""
         chain_line = ""
@@ -693,7 +750,8 @@ class ChainMonitor:
                     self._log("Last restart time: unknown (no previous start time from target)")
                     self._log("Holdoff: inactive")
 
-            self._send_telegram_startup()
+            secondary_validation = self._validate_secondary_targets()
+            self._send_telegram_startup(secondary_validation)
 
             interval = self.cfg.get("interval", 10)
             threshold = self.cfg.get("threshold", 120)
