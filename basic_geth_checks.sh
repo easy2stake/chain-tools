@@ -123,6 +123,7 @@ format_age() {
 }
 
 # Blocks/sec from latest block increments (persisted in /tmp for watch -n1)
+# Keeps a 60s rolling window of (timestamp, block) samples for a smoother average.
 # Second arg is endpoint (URL or port) so each chain has its own state file.
 print_blocks_per_sec() {
   local latest_block=$1
@@ -131,17 +132,42 @@ print_blocks_per_sec() {
   local RATE_FILE="/tmp/geth_block_rate_${suffix}.tmp"
   local now=$(date +%s)
   local bps="-"
+  local window_sec=60
+  local min_ts="" max_ts="" block_at_min="" block_at_max=""
+
+  # Read existing samples, keep only from last 60s
   if [ -f "$RATE_FILE" ]; then
-    local prev_ts prev_block
-    read -r prev_ts prev_block < "$RATE_FILE" 2>/dev/null
-    local delta_sec=$((now - prev_ts))
-    # Only use stored data if from the last 60s (avoid mixing with old runs from another day)
-    if [ -n "$prev_ts" ] && [ -n "$prev_block" ] && [ "$prev_ts" -lt "$now" ] && [ "$prev_block" -le "$latest_block" ] && [ "$delta_sec" -gt 0 ] && [ "$delta_sec" -le 60 ]; then
-      local delta_blocks=$((latest_block - prev_block))
-      bps=$(echo "scale=4; $delta_blocks / $delta_sec" | bc -l 2>/dev/null || echo "-")
-    fi
+    while read -r ts block; do
+      [ -z "$ts" ] && continue
+      age=$((now - ts))
+      [ "$age" -gt "$window_sec" ] && continue
+      if [ -z "$min_ts" ] || [ "$ts" -lt "$min_ts" ]; then min_ts=$ts; block_at_min=$block; fi
+      if [ -z "$max_ts" ] || [ "$ts" -gt "$max_ts" ]; then max_ts=$ts; block_at_max=$block; fi
+    done < "$RATE_FILE" 2>/dev/null
   fi
-  echo "$now $latest_block" > "$RATE_FILE"
+
+  # Include current sample
+  if [ -z "$min_ts" ] || [ "$now" -lt "$min_ts" ]; then min_ts=$now; block_at_min=$latest_block; fi
+  if [ -z "$max_ts" ] || [ "$now" -gt "$max_ts" ]; then max_ts=$now; block_at_max=$latest_block; fi
+
+  # Average bps over window (oldest vs newest in window)
+  if [ -n "$min_ts" ] && [ -n "$max_ts" ] && [ "$max_ts" -gt "$min_ts" ] && [ "$block_at_max" -ge "$block_at_min" ]; then
+    local delta_blocks=$((block_at_max - block_at_min))
+    local delta_sec=$((max_ts - min_ts))
+    bps=$(echo "scale=4; $delta_blocks / $delta_sec" | bc -l 2>/dev/null || echo "-")
+  fi
+
+  # Append new sample and rewrite file with only samples from last 60s
+  {
+    if [ -f "$RATE_FILE" ]; then
+      while read -r ts block; do
+        [ -z "$ts" ] && continue
+        [ $((now - ts)) -le "$window_sec" ] && echo "$ts $block"
+      done < "$RATE_FILE" 2>/dev/null
+    fi
+    echo "$now $latest_block"
+  } | sort -n > "${RATE_FILE}.$$" && mv "${RATE_FILE}.$$" "$RATE_FILE"
+
   log "\nBlocks/sec: $bps"
 }
 
