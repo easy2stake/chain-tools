@@ -122,6 +122,29 @@ format_age() {
   fi
 }
 
+# Blocks/sec from latest block increments (persisted in /tmp for watch -n1)
+# Second arg is endpoint (URL or port) so each chain has its own state file.
+print_blocks_per_sec() {
+  local latest_block=$1
+  local endpoint=${2:-default}
+  local suffix=$(echo "$endpoint" | tr -c '[:alnum:]' '_')
+  local RATE_FILE="/tmp/geth_block_rate_${suffix}.tmp"
+  local now=$(date +%s)
+  local bps="-"
+  if [ -f "$RATE_FILE" ]; then
+    local prev_ts prev_block
+    read -r prev_ts prev_block < "$RATE_FILE" 2>/dev/null
+    local delta_sec=$((now - prev_ts))
+    # Only use stored data if from the last 60s (avoid mixing with old runs from another day)
+    if [ -n "$prev_ts" ] && [ -n "$prev_block" ] && [ "$prev_ts" -lt "$now" ] && [ "$prev_block" -le "$latest_block" ] && [ "$delta_sec" -gt 0 ] && [ "$delta_sec" -le 60 ]; then
+      local delta_blocks=$((latest_block - prev_block))
+      bps=$(echo "scale=4; $delta_blocks / $delta_sec" | bc -l 2>/dev/null || echo "-")
+    fi
+  fi
+  echo "$now $latest_block" > "$RATE_FILE"
+  log "\nBlocks/sec: $bps"
+}
+
 # Function to perform all checks
 perform_checks() {
   # Chain ID
@@ -198,6 +221,8 @@ perform_checks() {
     age=$(format_age "${BT_TS[$i]}")
     printf "%-10s %-20s %-12s %-12s %-10s %-66s %-10s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "$age" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
   done
+
+  print_blocks_per_sec "${BT_DEC[0]}" "$URL"
 }
 
 # Function to check a specific block by number
