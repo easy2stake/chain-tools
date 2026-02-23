@@ -494,7 +494,7 @@ class ChainMonitor:
                 parts.append(f"services FAILED: {', '.join(failed_services)}")
             prefix = "[DRY RUN] " if dry else ""
             self._send_telegram(
-                f"🔄 <b>eth-monitor</b>: {prefix}Secondary targets: {' | '.join(parts)} | Host: {HOSTNAME}"
+                f"🔄 <b>eth-monitor</b>: {prefix}Restarted secondary containers/services: {' | '.join(parts)} | Host: {HOSTNAME}"
             )
 
     def _restart_container(self, container: str) -> bool:
