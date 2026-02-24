@@ -446,11 +446,12 @@ get_prysm_peers() {
   fi
 }
 
-# Monitor loop: run general_check every second
+# Monitor loop: run general_check every second (buffer output to reduce flicker)
 monitor_loop() {
   while true; do
+    output=$(perform_checks 2>&1)
     clear 2>/dev/null || true
-    perform_checks
+    echo "$output"
     sleep 1
   done
 }
