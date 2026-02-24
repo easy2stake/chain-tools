@@ -28,6 +28,7 @@ Usage: $0 <full_url_or_port> <command> [command_options]
 
 Commands:
   general_check                  Perform all basic Geth checks (chain ID, peer count, sync status, blocks).
+  monitor                        Same as general_check but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -35,6 +36,7 @@ Commands:
   prysm_peers                  Extract consensus layer PRYSM peers.
 Examples:
   $0 8545 general_check
+  $0 8545 monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
@@ -444,12 +446,23 @@ get_prysm_peers() {
   fi
 }
 
+# Monitor loop: run general_check every second
+monitor_loop() {
+  while true; do
+    clear 2>/dev/null || true
+    perform_checks
+    sleep 1
+  done
+}
+
 # Main logic
 if [ -z "$2" ]; then
   # No command provided: default to general_check
   perform_checks
 elif [ "$2" == "general_check" ]; then
   perform_checks
+elif [ "$2" == "monitor" ]; then
+  monitor_loop
 elif [ "$2" == "block_summary" ]; then
   if [ -z "$3" ]; then
     log "Error: Block number not provided."
