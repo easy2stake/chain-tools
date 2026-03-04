@@ -3,6 +3,7 @@
 
 import os
 import sys
+from datetime import datetime, timezone
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -134,6 +135,25 @@ def get_tx_receipt(tx_hash: str) -> dict | None:
     return rpc_call("eth_getTransactionReceipt", [h])
 
 
+def parse_block_arg(arg: str) -> str:
+    """Parse block argument to eth_getBlockByNumber format. Returns hex block tag or number."""
+    s = arg.strip().lower()
+    if s in ("latest", "safe", "finalized", "finalised", "pending", "earliest"):
+        return "finalized" if s == "finalised" else s
+    if s.startswith("0x"):
+        return s if len(s) > 2 else "0x0"
+    try:
+        n = int(s)
+        return hex(n)
+    except ValueError:
+        return arg
+
+
+def get_block(block_param: str, full_tx: bool = False) -> dict | None:
+    """Get block by number or tag. block_param: latest, safe, finalized, pending, or hex block number."""
+    return rpc_call("eth_getBlockByNumber", [block_param, full_tx])
+
+
 def _format_balance(value: float, decimals: int) -> str:
     """Format token balance for display (comma-separated, sensible precision)."""
     if decimals <= 6:
@@ -210,10 +230,11 @@ def check_tx(tx_hash: str) -> None:
     chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
     token_by_addr = {addr.lower(): (sym, dec) for sym, addr, dec in TOKENS_BY_CHAIN.get(chain_id or 0, [])}
 
-    print(f"TX: {h}")
-    print(f"Chain: {chain_name} ({chain_id})")
-    print(f"RPC: {RPC_URL}")
-    print("-" * 50)
+
+    print(f"{'Chain:':8} {chain_name} ({chain_id})")
+    print(f"{'RPC:':8} {RPC_URL}")
+    print("-" * 80)
+    print(f"TX Hash:     {h}")
     print(f"From:        {tx.get('from', 'N/A')}")
     print(f"To:          {tx.get('to') or '(contract creation)'}")
     print(f"Value:       {wei_to_eth(tx.get('value', '0x0')):.6f} ETH")
@@ -222,9 +243,19 @@ def check_tx(tx_hash: str) -> None:
     print(f"Gas Price:   {int(gas_price, 16) / 1e9:.2f} Gwei")
 
     if receipt:
-        print(f"Status:      {'Success' if receipt.get('status') == '0x1' else 'Failed'}")
+        gas_used = int(receipt.get("gasUsed", "0x0"), 16)
+        eff_gas = receipt.get("effectiveGasPrice") or tx.get("gasPrice") or tx.get("maxFeePerGas") or "0x0"
+        fee_wei = gas_used * int(eff_gas, 16)
+        fee_eth = fee_wei / 1e18
+        block_num = receipt.get("blockNumber")
+        block = get_block(block_num) if block_num else None
+        ts = int(block.get("timestamp", "0x0"), 16) if block else 0
+        ts_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "N/A"
+        print(f"Gas Used:    {gas_used:,}")
+        print(f"Tx Fee:      {fee_eth:.6f} ETH")
+        print(f"Timestamp:   {ts_str}")
         print(f"Block:       {int(receipt.get('blockNumber', '0x0'), 16):,}")
-        print(f"Gas Used:    {int(receipt.get('gasUsed', '0x0'), 16):,}")
+        print(f"Status:      {'Success' if receipt.get('status') == '0x1' else 'Failed'}")
 
     # ERC20 token transfers from receipt logs (show all, not just those involving tx sender)
     tx_from = (tx.get("from") or "").lower()
@@ -269,25 +300,66 @@ def check_tx(tx_hash: str) -> None:
             print(f"  {direction.capitalize():8} {amt_fmt:>12} {label}  ({dest})")
 
 
+def check_block(block_arg: str) -> None:
+    """Query and print block details."""
+    block_param = parse_block_arg(block_arg)
+    block = get_block(block_param)
+    if not block:
+        print("Block not found.", file=sys.stderr)
+        sys.exit(1)
+
+    chain_id = get_chain_id()
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+
+    print(f"Block: {block_param}")
+    print(f"Chain: {chain_name} ({chain_id})")
+    print(f"RPC:   {RPC_URL}")
+    print("-" * 50)
+    num_hex = block.get("number", "0x0")
+    num_int = int(num_hex, 16)
+    print(f"Number:       {num_int:,} (0x{num_int:x})")
+    print(f"Hash:         {block.get('hash', 'N/A')}")
+    print(f"Parent:       {block.get('parentHash', 'N/A')}")
+    print(f"Timestamp:    {int(block.get('timestamp', '0x0'), 16)}")
+    print(f"Miner:        {block.get('miner', 'N/A')}")
+    print(f"Gas Limit:    {int(block.get('gasLimit', '0x0'), 16):,}")
+    print(f"Gas Used:     {int(block.get('gasUsed', '0x0'), 16):,}")
+    print(f"Tx Count:     {len(block.get('transactions', []))}")
+
+
+def print_help() -> None:
+    print("Usage: eth-cli.py balance <address> [--rpc URL]")
+    print("       eth-cli.py tx <tx_hash> [--rpc URL]")
+    print("       eth-cli.py block [latest|safe|finalized|NUMBER] [--rpc URL]")
+    print("")
+    print("  balance   - Check ETH + token balances for address")
+    print("  tx        - Query transaction by hash")
+    print("  block     - Query block (default: latest)")
+    print("             Args: latest, safe, finalized, pending, earliest, or block number (int/hex)")
+    print("  --rpc     - RPC URL (default: $ETH_RPC or public Ethereum)")
+
+
 def main():
     global RPC_URL
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print("Usage: eth-cli.py <address> [--rpc URL]")
-        print("       eth-cli.py tx <tx_hash> [--rpc URL]")
-        print("")
-        print("  address   - Ethereum address (balance check)")
-        print("  tx        - Query transaction by hash")
-        print("  --rpc     - RPC URL (default: $ETH_RPC or public Ethereum)")
-        sys.exit(0 if len(sys.argv) < 2 else 1)
+    if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
+        print_help()
+        sys.exit(0)
 
     args = sys.argv[1:]
     target = None
-    mode = "balance"
+    mode = None
     i = 0
     while i < len(args):
         if args[i] == "--rpc" and i + 1 < len(args):
             RPC_URL = args[i + 1]
+            i += 2
+        elif args[i] == "balance":
+            if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                print("Error: balance requires an address.", file=sys.stderr)
+                sys.exit(1)
+            mode = "balance"
+            target = args[i + 1]
             i += 2
         elif args[i] == "tx":
             if i + 1 >= len(args):
@@ -296,19 +368,31 @@ def main():
             mode = "tx"
             target = args[i + 1]
             i += 2
+        elif args[i] == "block":
+            mode = "block"
+            target = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else "latest"
+            if target == "latest":
+                i += 1
+            else:
+                i += 2
         else:
-            if mode != "tx":
-                target = args[i]
             i += 1
 
-    if not target:
-        print("Error: Address or tx hash required.", file=sys.stderr)
-        sys.exit(1)
-
-    if mode == "tx":
+    if mode == "block":
+        check_block(target or "latest")
+    elif mode == "tx":
+        if not target:
+            print("Error: Transaction hash required.", file=sys.stderr)
+            sys.exit(1)
         check_tx(target)
-    else:
+    elif mode == "balance":
+        if not target:
+            print("Error: Address required.", file=sys.stderr)
+            sys.exit(1)
         check_balance(target)
+    else:
+        print_help()
+        sys.exit(0)
 
 
 if __name__ == "__main__":
