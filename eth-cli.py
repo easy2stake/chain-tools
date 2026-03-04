@@ -1,37 +1,62 @@
 #!/usr/bin/env python3
-"""Simple Ethereum CLI - check ETH and major ERC20 token balances."""
+"""Simple Ethereum CLI - balance check and transaction lookup."""
 
+import os
 import sys
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Configuration ---
 DEFAULT_RPC = "https://ethereum-rpc.publicnode.com"
-RPC_URL = DEFAULT_RPC
+RPC_URL = os.environ.get("ETH_RPC", DEFAULT_RPC)
 
-# ERC20 token contracts (Ethereum mainnet) - (symbol, address, decimals)
-# Etherscan links: https://etherscan.io/token/<address>
-TOKENS = [
-    # Stablecoins
-    ("USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6),   # https://etherscan.io/token/0xdac17f958d2ee523a2206206994597c13d831ec7
-    ("USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),   # https://etherscan.io/token/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
-    ("DAI",  "0x6B175474E89094C44Da98b954Eedeac495271d0F", 18),  # https://etherscan.io/token/0x6b175474e89094c44da98b954eedeac495271d0f
-    # Wrapped / bridged
-    ("WETH", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", 18),  # https://etherscan.io/token/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
-    ("WBTC", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", 8),    # https://etherscan.io/token/0x2260fac5e5542a773aa44fbcfedf7c193bc2c599
-    # DeFi / governance
-    ("LINK", "0x514910771AF9Ca656af840dff83E8264EcF986CA", 18),  # https://etherscan.io/token/0x514910771af9ca656af840dff83e8264ecf986ca
-    ("UNI",  "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984", 18),   # https://etherscan.io/token/0x1f9840a85d5af5bf1d1762f925bdaddc4201f984
-    ("AAVE", "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9", 18),   # https://etherscan.io/token/0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9
-    ("MKR",  "0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2", 18),   # https://etherscan.io/token/0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2
-    ("CRV",  "0xD533a949740bb3306d119CC777fa900bA034cd52", 18),   # https://etherscan.io/token/0xd533a949740bb3306d119cc777fa900ba034cd52
-    ("LDO",  "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32", 18),   # https://etherscan.io/token/0x5a98fcbea516cf06857215779fd812ca3bef1b32
-    ("GRT",  "0xc944E90C64B2c07662A292be6244BDF05CdA44a7", 18),  # https://etherscan.io/token/0xc944e90c64b2c07662a292be6244bdf05cda44a7
-    ("HOPR", "0xF5581dFeFD8Fb0e4aeC526bE659CFaB1f8c781dA", 18),  # https://etherscan.io/token/0xf5581dfefd8fb0e4aec526be659cfab1f8c781da
-    # Meme / popular
-    ("SHIB", "0x95aD61b0a150d79219dC64E6eEB7C517d7cC5A6c", 18),   # https://etherscan.io/token/0x95ad61b0a150d79219dc64e6eeb7c517d7cc5a6c
-    ("PEPE", "0x6982508145454Ce325dDbE47a25d4ec3d2311933", 18),   # https://etherscan.io/token/0x6982508145454ce325ddbe47a25d4ec3d2311933
-]
+# Chain IDs
+CHAIN_ETH = 1
+CHAIN_ZIRCUIT = 48900
+
+# ERC20 token contracts by chain ID - (symbol, address, decimals)
+# Etherscan: https://etherscan.io/token/<addr> | Zircuit: https://explorer.zircuit.com
+TOKENS_BY_CHAIN: dict[int, list[tuple[str, str, int]]] = {
+    CHAIN_ETH: [
+        ("USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6),
+        ("USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
+        ("DAI", "0x6B175474E89094C44Da98b954Eedeac495271d0F", 18),
+        ("WETH", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", 18),
+        ("WBTC", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", 8),
+        ("LINK", "0x514910771AF9Ca656af840dff83E8264EcF986CA", 18),
+        ("UNI", "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984", 18),
+        ("AAVE", "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9", 18),
+        ("MKR", "0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2", 18),
+        ("CRV", "0xD533a949740bb3306d119CC777fa900bA034cd52", 18),
+        ("LDO", "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32", 18),
+        ("GRT", "0xc944E90C64B2c07662A292be6244BDF05CdA44a7", 18),
+        ("HOPR", "0xF5581dFeFD8Fb0e4aeC526bE659CFaB1f8c781dA", 18),
+        ("SHIB", "0x95aD61b0a150d79219dC64E6eEB7C517d7cC5A6c", 18),
+        ("PEPE", "0x6982508145454Ce325dDbE47a25d4ec3d2311933", 18),
+    ],
+    CHAIN_ZIRCUIT: [
+        ("USDC", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6),
+        ("USDT", "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", 6),
+        ("WETH", "0x4200000000000000000000000000000000000006", 18),
+        ("ZRC", "0xfd418E42783382E86Ae91e445406600Ba144D162", 18),
+    ],
+}
+
+# ERC20 Transfer(address,address,uint256) topic0
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+CHAIN_NAMES: dict[int, str] = {
+    CHAIN_ETH: "Ethereum",
+    CHAIN_ZIRCUIT: "Zircuit",
+}
+
+
+def get_chain_id() -> int | None:
+    """Get chain ID from RPC via eth_chainId."""
+    result = rpc_call("eth_chainId", [])
+    if result is None:
+        return None
+    return int(result, 16)
 
 
 def rpc_call(method: str, params: list) -> dict | None:
@@ -93,6 +118,22 @@ def raw_to_token(raw_hex: str, decimals: int) -> float:
     return raw / (10**decimals)
 
 
+def get_tx(tx_hash: str) -> dict | None:
+    """Get transaction by hash. Returns tx dict or None."""
+    h = tx_hash.strip()
+    if not h.startswith("0x"):
+        h = "0x" + h
+    return rpc_call("eth_getTransactionByHash", [h])
+
+
+def get_tx_receipt(tx_hash: str) -> dict | None:
+    """Get transaction receipt. Returns receipt dict or None."""
+    h = tx_hash.strip()
+    if not h.startswith("0x"):
+        h = "0x" + h
+    return rpc_call("eth_getTransactionReceipt", [h])
+
+
 def _format_balance(value: float, decimals: int) -> str:
     """Format token balance for display (comma-separated, sensible precision)."""
     if decimals <= 6:
@@ -113,17 +154,22 @@ def _fetch_token(addr: str, symbol: str, token_addr: str, decimals: int) -> tupl
 def check_balance(address: str) -> None:
     """Check and print ETH + all configured ERC20 token balances (parallel requests)."""
     addr = to_checksum(address)
+    chain_id = get_chain_id()
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}" if chain_id else "Unknown")
+    tokens = TOKENS_BY_CHAIN.get(chain_id, []) if chain_id else []
+
     print(f"Address: {addr}")
-    print(f"RPC: {RPC_URL}")
+    print(f"Chain:   {chain_name} ({chain_id})")
+    print(f"RPC:     {RPC_URL}")
     print("-" * 50)
 
-    results: dict[str, tuple[str | None, int | None]] = {}  # label -> (raw_hex, decimals|None)
+    results: dict[str, tuple[str | None, int | None]] = {}
 
-    with ThreadPoolExecutor(max_workers=min(32, 1 + len(TOKENS))) as executor:
+    with ThreadPoolExecutor(max_workers=min(32, 1 + len(tokens))) as executor:
         futures = [executor.submit(_fetch_eth, addr)]
         futures += [
             executor.submit(_fetch_token, addr, sym, tok, dec)
-            for sym, tok, dec in TOKENS
+            for sym, tok, dec in tokens
         ]
         for future in as_completed(futures):
             label, raw_hex, decimals = future.result()
@@ -137,7 +183,7 @@ def check_balance(address: str) -> None:
             print(f"ETH:  {eth_val:.6f}")
 
     # Print tokens in original order (skip if failed or zero)
-    for symbol, _, decimals in TOKENS:
+    for symbol, _, decimals in tokens:
         raw_hex, _ = results.get(symbol, (None, None))
         if raw_hex is not None and decimals is not None:
             val = raw_to_token(raw_hex, decimals)
@@ -145,31 +191,124 @@ def check_balance(address: str) -> None:
                 print(f"{symbol}: {_format_balance(val, decimals)}")
 
 
+def check_tx(tx_hash: str) -> None:
+    """Query and print transaction details."""
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_tx = ex.submit(get_tx, tx_hash)
+        f_rcpt = ex.submit(get_tx_receipt, tx_hash)
+        f_chain = ex.submit(get_chain_id)
+        tx, receipt, chain_id = f_tx.result(), f_rcpt.result(), f_chain.result()
+
+    if not tx:
+        print("Transaction not found.", file=sys.stderr)
+        sys.exit(1)
+
+    h = tx_hash.strip()
+    if not h.startswith("0x"):
+        h = "0x" + h
+
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+    token_by_addr = {addr.lower(): (sym, dec) for sym, addr, dec in TOKENS_BY_CHAIN.get(chain_id or 0, [])}
+
+    print(f"TX: {h}")
+    print(f"Chain: {chain_name} ({chain_id})")
+    print(f"RPC: {RPC_URL}")
+    print("-" * 50)
+    print(f"From:        {tx.get('from', 'N/A')}")
+    print(f"To:          {tx.get('to') or '(contract creation)'}")
+    print(f"Value:       {wei_to_eth(tx.get('value', '0x0')):.6f} ETH")
+    print(f"Gas Limit:   {int(tx.get('gas', '0x0'), 16):,}")
+    gas_price = tx.get("gasPrice") or tx.get("maxFeePerGas") or "0x0"
+    print(f"Gas Price:   {int(gas_price, 16) / 1e9:.2f} Gwei")
+
+    if receipt:
+        print(f"Status:      {'Success' if receipt.get('status') == '0x1' else 'Failed'}")
+        print(f"Block:       {int(receipt.get('blockNumber', '0x0'), 16):,}")
+        print(f"Gas Used:    {int(receipt.get('gasUsed', '0x0'), 16):,}")
+
+    # ERC20 token transfers from receipt logs (show all, not just those involving tx sender)
+    tx_from = (tx.get("from") or "").lower()
+    token_transfers: list[tuple[str, str, str, float, str, str]] = []  # (direction, symbol, addr, amount, from_addr, to_addr)
+
+    for log in receipt.get("logs", []) if receipt else []:
+        topics = log.get("topics", [])
+        if len(topics) < 3 or (topics[0] or "").lower() != TRANSFER_TOPIC:
+            continue
+        token_addr = (log.get("address") or "").lower()
+        from_addr = ("0x" + topics[1][-40:]).lower() if len(topics[1]) >= 40 else ""
+        to_addr = ("0x" + topics[2][-40:]).lower() if len(topics[2]) >= 40 else ""
+        raw_amount = log.get("data", "0x0")
+        if raw_amount == "0x":
+            raw_amount = "0x0"
+        amount_raw = int(raw_amount, 16)
+        sym, dec = token_by_addr.get(token_addr, ("?", 18))
+        amount = amount_raw / (10**dec)
+        if amount == 0:
+            continue
+        if from_addr == tx_from:
+            direction = "sent"
+        elif to_addr == tx_from:
+            direction = "received"
+        else:
+            direction = "transfer"
+        token_transfers.append((direction, sym, token_addr, amount, from_addr, to_addr))
+
+    if token_transfers:
+        print("")
+        print("Token transfers:")
+        for direction, sym, addr, amt, fr, to in token_transfers:
+            label = sym if sym != "?" else f"{addr[:8]}...{addr[-6:]}"
+            dec = token_by_addr.get(addr, ("", 18))[1]
+            amt_fmt = _format_balance(amt, dec)
+            if direction == "sent":
+                dest = f"to {to}"
+            elif direction == "received":
+                dest = f"from {fr}"
+            else:
+                dest = f"{fr} -> {to}"
+            print(f"  {direction.capitalize():8} {amt_fmt:>12} {label}  ({dest})")
+
+
 def main():
     global RPC_URL
 
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("Usage: eth-cli.py <address> [--rpc URL]")
-        print("  address  - Ethereum address to check balances for")
-        print("  --rpc    - Optional RPC URL (default: https://ethereum-rpc.publicnode.com)")
+        print("       eth-cli.py tx <tx_hash> [--rpc URL]")
+        print("")
+        print("  address   - Ethereum address (balance check)")
+        print("  tx        - Query transaction by hash")
+        print("  --rpc     - RPC URL (default: $ETH_RPC or public Ethereum)")
         sys.exit(0 if len(sys.argv) < 2 else 1)
 
     args = sys.argv[1:]
-    address = None
+    target = None
+    mode = "balance"
     i = 0
     while i < len(args):
         if args[i] == "--rpc" and i + 1 < len(args):
             RPC_URL = args[i + 1]
             i += 2
+        elif args[i] == "tx":
+            if i + 1 >= len(args):
+                print("Error: tx requires a transaction hash.", file=sys.stderr)
+                sys.exit(1)
+            mode = "tx"
+            target = args[i + 1]
+            i += 2
         else:
-            address = args[i]
+            if mode != "tx":
+                target = args[i]
             i += 1
 
-    if not address:
-        print("Error: Address required.", file=sys.stderr)
+    if not target:
+        print("Error: Address or tx hash required.", file=sys.stderr)
         sys.exit(1)
 
-    check_balance(address)
+    if mode == "tx":
+        check_tx(target)
+    else:
+        check_balance(target)
 
 
 if __name__ == "__main__":
