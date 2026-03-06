@@ -502,7 +502,9 @@ def check_block(block_arg: str) -> None:
     print(f"Number:       {num_int:,} (0x{num_int:x})")
     print(f"Hash:         {block.get('hash', 'N/A')}")
     print(f"Parent:       {block.get('parentHash', 'N/A')}")
-    print(f"Timestamp:    {int(block.get('timestamp', '0x0'), 16)}")
+    ts = int(block.get('timestamp', '0x0'), 16)
+    ts_human = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "N/A"
+    print(f"Timestamp:    {ts} ({ts_human})")
     print(f"Miner:        {block.get('miner', 'N/A')}")
     print(f"Gas Limit:    {int(block.get('gasLimit', '0x0'), 16):,}")
     print(f"Gas Used:     {int(block.get('gasUsed', '0x0'), 16):,}")
