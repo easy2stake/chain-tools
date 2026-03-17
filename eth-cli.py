@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- Configuration ---
 DEFAULT_RPC_BY_CHAIN: dict[int, str] = {
     1: "https://ethereum-rpc.publicnode.com",
+    56: "https://bsc-dataseed.binance.org",
     48900: "https://mainnet.zircuit.com",
     1284: "https://rpc.api.moonbeam.network",
 }
@@ -18,6 +19,7 @@ RPC_URL = os.environ.get("ETH_RPC", DEFAULT_RPC)
 
 # Chain IDs
 CHAIN_ETH = 1
+CHAIN_BSC = 56
 CHAIN_ZIRCUIT = 48900
 CHAIN_MOONBEAM = 1284
 
@@ -25,6 +27,9 @@ CHAIN_MOONBEAM = 1284
 CHAIN_ALIASES: dict[str, int] = {
     "eth": CHAIN_ETH,
     "ethereum": CHAIN_ETH,
+    "bsc": CHAIN_BSC,
+    "bnb": CHAIN_BSC,
+    "binance": CHAIN_BSC,
     "zircuit": CHAIN_ZIRCUIT,
     "moonbeam": CHAIN_MOONBEAM,
     "glmr": CHAIN_MOONBEAM,
@@ -33,6 +38,7 @@ CHAIN_ALIASES: dict[str, int] = {
 # Env var names for per-chain RPC: ETH_RPC_1, ETH_RPC_ETH, ETH_RPC_48900, etc.
 CHAIN_ENV_ALIASES: dict[int, list[str]] = {
     CHAIN_ETH: ["1", "eth", "ethereum"],
+    CHAIN_BSC: ["56", "bsc", "bnb", "binance"],
     CHAIN_ZIRCUIT: ["48900", "zircuit"],
     CHAIN_MOONBEAM: ["1284", "moonbeam", "glmr"],
 }
@@ -66,6 +72,16 @@ TOKENS_BY_CHAIN: dict[int, list[tuple[str, str, int]]] = {
         ("SHIB", "0x95aD61b0a150d79219dC64E6eEB7C517d7cC5A6c", 18),
         ("PEPE", "0x6982508145454Ce325dDbE47a25d4ec3d2311933", 18),
     ],
+    CHAIN_BSC: [
+        ("USDT", "0x55d398326f99059fF775485246999027B3197955", 18),
+        ("USDC", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", 18),
+        ("BUSD", "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56", 18),
+        ("WBNB", "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", 18),
+        ("DAI", "0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3", 18),
+        ("ETH", "0x2170Ed0880ac9A755fd29B2688956BD959F933F8", 18),
+        ("BTCB", "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c", 18),
+        ("CAKE", "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82", 18),
+    ],
     CHAIN_ZIRCUIT: [
         ("USDC", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6),
         ("USDT", "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", 6),
@@ -84,12 +100,14 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 
 CHAIN_NAMES: dict[int, str] = {
     CHAIN_ETH: "Ethereum",
+    CHAIN_BSC: "BSC",
     CHAIN_ZIRCUIT: "Zircuit",
     CHAIN_MOONBEAM: "Moonbeam",
 }
 
 NATIVE_SYMBOL: dict[int, str] = {
     CHAIN_ETH: "ETH",
+    CHAIN_BSC: "BNB",
     CHAIN_ZIRCUIT: "ETH",
     CHAIN_MOONBEAM: "GLMR",
 }
@@ -520,7 +538,7 @@ def print_help() -> None:
     print("  tx        - Query transaction by hash")
     print("  block     - Query block (default: latest)")
     print("             Args: latest, safe, finalized, pending, earliest, or block number (int/hex)")
-    print("  --chain   - Chain: eth, zircuit, moonbeam (uses default RPC for that chain)")
+    print("  --chain   - Chain: eth, bsc, zircuit, moonbeam (uses default RPC for that chain)")
     print("  --rpc     - RPC URL (overrides --chain default; else $ETH_RPC or Ethereum)")
     print("")
     print("  Env: ETH_CHAIN (chain when no --chain); ETH_RPC (fallback);")
