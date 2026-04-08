@@ -77,6 +77,13 @@ get_block_data() {
   echo "$RPC_RESULT"
 }
 
+# Substrate (e.g. Bittensor): best block header — result.number is the latest block (eth_getBlockByNumber often unavailable)
+get_substrate_best_header() {
+  timed_rpc '{"jsonrpc":"2.0","method":"chain_getHeader","params":[],"id":1}'
+  echo "ELAPSED:${RPC_ELAPSED}"
+  echo "$RPC_RESULT"
+}
+
 # Function to extract field from block data
 extract_field() {
   data=$1
@@ -251,7 +258,9 @@ print_time_to_sync() {
 
 # Resolve chain identity for display: EVM uses eth_chainId (hex + decimal);
 # Substrate-style nodes (e.g. Bittensor) often omit eth_chainId — use system_chain name instead.
+# Sets CHAIN_RPC_MODE to evm or substrate (drives block RPC in perform_checks).
 resolve_chain_identity() {
+  CHAIN_RPC_MODE=evm
   timed_rpc '{"jsonrpc":"2.0","method":"eth_chainId","params": [],"id":1}'
   chain_id_elapsed="$RPC_ELAPSED"
   chain_id=$(echo "$RPC_RESULT" | jq -r ".result // empty")
@@ -269,6 +278,7 @@ resolve_chain_identity() {
     chain_id="$sc_name"
     chain_id_int="$sc_name"
     chain_id_elapsed=$(echo "$chain_id_elapsed + $sc_elapsed" | bc -l 2>/dev/null || echo "$chain_id_elapsed")
+    CHAIN_RPC_MODE=substrate
   else
     chain_id=""
     chain_id_int="-"
@@ -311,6 +321,39 @@ perform_checks() {
   declare -a BT_KEYS=("latest" "safe" "finalized" "earliest")
   declare -a BT_HEX BT_DEC BT_HASH BT_TIME BT_TS BT_MS
   for i in 0 1 2 3; do
+    if [ "${CHAIN_RPC_MODE:-evm}" = "substrate" ]; then
+      if [ "$i" -eq 0 ]; then
+        block_output=$(get_substrate_best_header)
+        block_elapsed=$(echo "$block_output" | head -1 | sed 's/ELAPSED://')
+        block_data=$(echo "$block_output" | tail -n +2)
+        req_ms=$(echo "scale=0; $block_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "0")
+        block_number_hex=$(extract_field "$block_data" "number")
+        if [ -z "$block_number_hex" ] || [ "$block_number_hex" = "null" ]; then
+          BT_HEX[0]="null"
+          BT_DEC[0]="0"
+          BT_HASH[0]="null"
+          BT_TIME[0]="-"
+          BT_TS[0]="0"
+        else
+          block_number_int=$(safe_hex_to_dec "$block_number_hex")
+          BT_HEX[0]="$block_number_hex"
+          BT_DEC[0]="$block_number_int"
+          BT_HASH[0]="-"
+          BT_TIME[0]="-"
+          BT_TS[0]="0"
+        fi
+        BT_MS[0]="$req_ms"
+      else
+        BT_HEX[$i]="-"
+        BT_DEC[$i]="-"
+        BT_HASH[$i]="-"
+        BT_TIME[$i]="-"
+        BT_TS[$i]="0"
+        BT_MS[$i]="-"
+      fi
+      continue
+    fi
+
     block_type="${BT_KEYS[$i]}"
     block_output=$(get_block_data "$block_type")
     block_elapsed=$(echo "$block_output" | head -1 | sed 's/ELAPSED://')
