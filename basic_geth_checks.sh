@@ -249,16 +249,36 @@ print_time_to_sync() {
   log "\nTime to sync: $eta"
 }
 
-# Function to perform all checks
-perform_checks() {
-  # Chain ID
+# Resolve chain identity for display: EVM uses eth_chainId (hex + decimal);
+# Substrate-style nodes (e.g. Bittensor) often omit eth_chainId — use system_chain name instead.
+resolve_chain_identity() {
   timed_rpc '{"jsonrpc":"2.0","method":"eth_chainId","params": [],"id":1}'
   chain_id_elapsed="$RPC_ELAPSED"
-  chain_id=$(echo "$RPC_RESULT" | jq -r ".result")
+  chain_id=$(echo "$RPC_RESULT" | jq -r ".result // empty")
   chain_id_int="-"
   if [ -n "$chain_id" ] && [ "$chain_id" != "null" ]; then
     chain_id_int=$(safe_hex_to_dec "$chain_id")
+    return 0
   fi
+  chain_id=""
+  timed_rpc '{"jsonrpc":"2.0","method":"system_chain","params":[],"id":1}'
+  local sc_elapsed="$RPC_ELAPSED"
+  local sc_name
+  sc_name=$(echo "$RPC_RESULT" | jq -r 'if (.result | type) == "string" then .result else empty end')
+  if [ -n "$sc_name" ]; then
+    chain_id="$sc_name"
+    chain_id_int="$sc_name"
+    chain_id_elapsed=$(echo "$chain_id_elapsed + $sc_elapsed" | bc -l 2>/dev/null || echo "$chain_id_elapsed")
+  else
+    chain_id=""
+    chain_id_int="-"
+  fi
+}
+
+# Function to perform all checks
+perform_checks() {
+  # Chain ID (EVM hex/dec, or Substrate chain name)
+  resolve_chain_identity
 
   # Peer count
   timed_rpc '{"jsonrpc":"2.0","method":"net_peerCount","params": [],"id":1}'
