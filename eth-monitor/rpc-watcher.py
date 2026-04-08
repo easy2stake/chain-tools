@@ -130,12 +130,16 @@ class ChainMonitor:
         self.telegram_rate: dict[str, float] = {}
         self.chain_id: int | None = None
         self.chain_short_name = ""
+        # Substrate RPC (e.g. Bittensor) when eth_chainId is unavailable
+        self.substrate_chain_name: str | None = None
         self._log_file = self.cfg.get("log_file") or str(script_dir / "log" / "eth-monitor.log")
 
     def _chain_prefix(self) -> str:
         if self.chain_id is not None:
             sn = f" ({self.chain_short_name})" if self.chain_short_name else ""
             return f"Chain ID: {self.chain_id}{sn}"
+        if self.substrate_chain_name:
+            return f"Chain: {self.substrate_chain_name}"
         return f"Chain: {self.cfg.get('name', '?')}"
 
     def _log(self, msg: str) -> None:
@@ -664,7 +668,10 @@ class ChainMonitor:
             return False
 
         data = self._rpc("eth_chainId", [])
-        if data and "result" in data and data["result"]:
+        chain_id_ok = bool(
+            data and "error" not in data and data.get("result"),
+        )
+        if chain_id_ok:
             self.chain_id = _hex_to_dec(data["result"])
             rpcs_path = self.script_dir / "rpcs.json"
             if rpcs_path.exists():
@@ -678,6 +685,16 @@ class ChainMonitor:
                 except (json.JSONDecodeError, TypeError):
                     pass
             self._log(f"Chain ID: {self.chain_id}" + (f" ({self.chain_short_name})" if self.chain_short_name else ""))
+        else:
+            sc_data = self._rpc("system_chain", [])
+            if (
+                sc_data
+                and "error" not in sc_data
+                and sc_data.get("result") == "Bittensor"
+            ):
+                self.substrate_chain_name = "Bittensor"
+                self.chain_short_name = "Bittensor"
+                self._log("Chain: Bittensor (system_chain; eth_chainId unavailable)")
         self._log("RPC endpoint validated successfully")
         return True
 
@@ -714,8 +731,10 @@ class ChainMonitor:
 
         dry = "\n<b>DRY RUN</b>" if self.cfg.get("dry_run") else ""
         chain_line = ""
-        if self.chain_id:
+        if self.chain_id is not None:
             chain_line = f"\n<b>Chain ID:</b> {self.chain_id}" + (f" ({self.chain_short_name})" if self.chain_short_name else "")
+        elif self.substrate_chain_name:
+            chain_line = f"\n<b>Chain:</b> {self.substrate_chain_name}"
         msg = (
             f"🟢 <b>{HOSTNAME} - rpcwatcher - started</b>{dry}\n"
             f"<b>RPC:</b> {self.cfg['url']}{chain_line}\n"
@@ -844,6 +863,8 @@ class ChainMonitor:
                         chain_info_parts.append(f"Chain ID: {self.chain_id}")
                         if self.chain_short_name:
                             chain_info_parts[-1] += f" ({self.chain_short_name})"
+                    elif self.substrate_chain_name:
+                        chain_info_parts.append(f"Chain: {self.substrate_chain_name}")
                     chain_name = self.cfg.get('name', 'unknown')
                     chain_info_parts.append(f"Chain: {chain_name}")
                     container = self.cfg.get('container')
