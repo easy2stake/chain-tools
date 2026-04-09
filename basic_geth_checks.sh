@@ -84,6 +84,14 @@ get_substrate_best_header() {
   echo "$RPC_RESULT"
 }
 
+# Substrate: block hash for a height — params are [block_number] as decimal (e.g. 2134948)
+# Uses timed_rpc; prints hash hex to stdout; leaves RPC_ELAPSED for the hash request.
+get_substrate_block_hash_by_number() {
+  local block_dec=$1
+  timed_rpc '{"jsonrpc":"2.0","method":"chain_getBlockHash","params":['"${block_dec}"'],"id":1}'
+  echo "$RPC_RESULT" | jq -r '.result // empty'
+}
+
 # Function to extract field from block data
 extract_field() {
   data=$1
@@ -338,7 +346,14 @@ perform_checks() {
           block_number_int=$(safe_hex_to_dec "$block_number_hex")
           BT_HEX[0]="$block_number_hex"
           BT_DEC[0]="$block_number_int"
-          BT_HASH[0]="-"
+          block_hash=$(get_substrate_block_hash_by_number "$block_number_int")
+          hash_elapsed="$RPC_ELAPSED"
+          if [ -n "$block_hash" ] && [ "$block_hash" != "null" ]; then
+            BT_HASH[0]="$block_hash"
+          else
+            BT_HASH[0]="-"
+          fi
+          req_ms=$(echo "scale=0; ($block_elapsed + $hash_elapsed) * 1000 / 1" | bc -l 2>/dev/null || echo "$req_ms")
           BT_TIME[0]="-"
           BT_TS[0]="0"
         fi
