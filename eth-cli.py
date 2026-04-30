@@ -261,6 +261,24 @@ def get_block(block_param: str, full_tx: bool = False) -> dict | None:
     return rpc_call("eth_getBlockByNumber", [block_param, full_tx])
 
 
+def get_block_by_hash(block_hash: str, full_tx: bool = False) -> dict | None:
+    """Get block by hash."""
+    h = block_hash.strip()
+    if not h.startswith("0x"):
+        h = "0x" + h
+    return rpc_call("eth_getBlockByHash", [h, full_tx])
+
+
+def _looks_like_block_hash(value: str) -> bool:
+    """Return True if value looks like a 32-byte hex block hash."""
+    s = value.strip().lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    if len(s) != 64:
+        return False
+    return all(c in "0123456789abcdef" for c in s)
+
+
 def _time_ago(ts: int) -> str:
     """Return human-readable 'X ago' string for a Unix timestamp."""
     now = datetime.now(timezone.utc)
@@ -502,8 +520,14 @@ def check_tx(tx_hash: str) -> None:
 
 def check_block(block_arg: str) -> None:
     """Query and print block details."""
-    block_param = parse_block_arg(block_arg)
-    block = get_block(block_param)
+    is_hash = _looks_like_block_hash(block_arg)
+    if is_hash:
+        block = get_block_by_hash(block_arg)
+        block_label = block.get("hash", block_arg) if block else block_arg
+    else:
+        block_param = parse_block_arg(block_arg)
+        block = get_block(block_param)
+        block_label = block_param
     if not block:
         print("Block not found.", file=sys.stderr)
         sys.exit(1)
@@ -511,7 +535,7 @@ def check_block(block_arg: str) -> None:
     chain_id = get_chain_id()
     chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
 
-    print(f"Block: {block_param}")
+    print(f"Block: {block_label}")
     print(f"Chain: {chain_name} ({chain_id})")
     print(f"RPC:   {RPC_URL}")
     print("-" * 50)
@@ -532,12 +556,12 @@ def check_block(block_arg: str) -> None:
 def print_help() -> None:
     print("Usage: eth-cli.py balance <address> [--chain NAME] [--rpc URL]")
     print("       eth-cli.py tx <tx_hash> [--chain NAME] [--rpc URL]")
-    print("       eth-cli.py block [latest|safe|finalized|NUMBER] [--chain NAME] [--rpc URL]")
+    print("       eth-cli.py block [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [--rpc URL]")
     print("")
     print("  balance   - Check native + token balances for address")
     print("  tx        - Query transaction by hash")
     print("  block     - Query block (default: latest)")
-    print("             Args: latest, safe, finalized, pending, earliest, or block number (int/hex)")
+    print("             Args: latest, safe, finalized, pending, earliest, block number (int/hex), or block hash")
     print("  --chain   - Chain: eth, bsc, zircuit, moonbeam (uses default RPC for that chain)")
     print("  --rpc     - RPC URL (overrides --chain default; else $ETH_RPC or Ethereum)")
     print("")
