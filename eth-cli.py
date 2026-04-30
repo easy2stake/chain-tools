@@ -518,6 +518,42 @@ def check_tx(tx_hash: str) -> None:
         _print_input_decoded(input_data)
 
 
+def check_mempool_tx(tx_hash: str) -> None:
+    """Check whether a transaction is pending in mempool."""
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_tx = ex.submit(get_tx, tx_hash)
+        f_chain = ex.submit(get_chain_id)
+        tx, chain_id = f_tx.result(), f_chain.result()
+
+    h = tx_hash.strip()
+    if not h.startswith("0x"):
+        h = "0x" + h
+
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+    native_sym = NATIVE_SYMBOL.get(chain_id, "ETH")
+    print(f"{'Chain:':8} {chain_name} ({chain_id})")
+    print(f"{'RPC:':8} {RPC_URL}")
+    print("-" * 80)
+    print(f"TX Hash:     {h}")
+
+    if not tx:
+        print("Status:      Not found (not in mempool / unknown to node)")
+        return
+
+    print(f"From:        {tx.get('from', 'N/A')}")
+    print(f"To:          {tx.get('to') or '(contract creation)'}")
+    print(f"Nonce:       {int(tx.get('nonce', '0x0'), 16)}")
+    print(f"Value:       {wei_to_eth(tx.get('value', '0x0')):.6f} {native_sym}")
+    gas_price = tx.get("gasPrice") or tx.get("maxFeePerGas") or "0x0"
+    print(f"Gas Price:   {int(gas_price, 16) / 1e9:.2f} Gwei")
+
+    block_num = tx.get("blockNumber")
+    if block_num:
+        print(f"Status:      Mined (block {int(block_num, 16):,})")
+    else:
+        print("Status:      Pending (in mempool)")
+
+
 def check_block(block_arg: str) -> None:
     """Query and print block details."""
     is_hash = _looks_like_block_hash(block_arg)
@@ -556,10 +592,12 @@ def check_block(block_arg: str) -> None:
 def print_help() -> None:
     print("Usage: eth-cli.py balance <address> [--chain NAME] [--rpc URL]")
     print("       eth-cli.py tx <tx_hash> [--chain NAME] [--rpc URL]")
+    print("       eth-cli.py mempool <tx_hash> [--chain NAME] [--rpc URL]")
     print("       eth-cli.py block [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [--rpc URL]")
     print("")
     print("  balance   - Check native + token balances for address")
     print("  tx        - Query transaction by hash")
+    print("  mempool   - Check if transaction is pending in mempool")
     print("  block     - Query block (default: latest)")
     print("             Args: latest, safe, finalized, pending, earliest, block number (int/hex), or block hash")
     print("  --chain   - Chain: eth, bsc, zircuit, moonbeam (uses default RPC for that chain)")
@@ -603,6 +641,13 @@ def main():
             mode = "tx"
             target = args[i + 1]
             i += 2
+        elif args[i] == "mempool":
+            if i + 1 >= len(args):
+                print("Error: mempool requires a transaction hash.", file=sys.stderr)
+                sys.exit(1)
+            mode = "mempool"
+            target = args[i + 1]
+            i += 2
         elif args[i] == "block":
             mode = "block"
             target = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else "latest"
@@ -631,6 +676,11 @@ def main():
 
     if mode == "block":
         check_block(target or "latest")
+    elif mode == "mempool":
+        if not target:
+            print("Error: Transaction hash required.", file=sys.stderr)
+            sys.exit(1)
+        check_mempool_tx(target)
     elif mode == "tx":
         if not target:
             print("Error: Transaction hash required.", file=sys.stderr)
