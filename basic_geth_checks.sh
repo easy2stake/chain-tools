@@ -29,6 +29,8 @@ Usage: $0 <full_url_or_port> <command> [command_options]
 Commands:
   general_check                  Perform all basic Geth checks (chain ID, peer count, sync status, blocks).
   monitor                        Same as general_check but loops every second (Ctrl+C to stop).
+  op_node_check                  Perform OP node checks (peers, sync status, L1/L2 heads where available).
+  op_monitor                     Same as op_node_check but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -37,6 +39,8 @@ Commands:
 Examples:
   $0 8545 general_check
   $0 8545 monitor
+  $0 9545 op_node_check
+  $0 9545 op_monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
@@ -152,6 +156,11 @@ format_age() {
   else
     echo "$((age/86400))d $((age%86400/3600))h"
   fi
+}
+
+# Check if value is a non-negative integer.
+is_uint() {
+  [[ "$1" =~ ^[0-9]+$ ]]
 }
 
 # Blocks/sec from latest block increments (persisted in /tmp for watch -n1)
@@ -410,6 +419,118 @@ perform_checks() {
   fi
 }
 
+# OP-node specific checks:
+# - peers from opp2p_peerStats (fallback opp2p_peers)
+# - sync/block status from optimism_syncStatus
+# - rollup chain ids from optimism_rollupConfig (when available)
+perform_op_node_checks() {
+  local rollup_elapsed version_elapsed peers_elapsed sync_elapsed
+  local rollup_data version_data peers_data sync_data
+  local l1_chain_id="-" l2_chain_id="-" op_version="-"
+  local peers_connected="-"
+  local req_ms_rollup="-" req_ms_version="-" req_ms_peers="-" req_ms_sync="-"
+
+  # Rollup config: derive L1/L2 chain IDs where available.
+  timed_rpc '{"jsonrpc":"2.0","method":"optimism_rollupConfig","params":[],"id":1}'
+  rollup_elapsed="$RPC_ELAPSED"
+  rollup_data="$RPC_RESULT"
+  if [ -n "$rollup_data" ] && [ "$rollup_data" != "null" ]; then
+    l1_chain_id=$(echo "$rollup_data" | jq -r '.result.l1_chain_id // "-"')
+    l2_chain_id=$(echo "$rollup_data" | jq -r '.result.l2_chain_id // "-"')
+  fi
+  req_ms_rollup=$(echo "scale=0; $rollup_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  # Version is useful context for operators.
+  timed_rpc '{"jsonrpc":"2.0","method":"optimism_version","params":[],"id":1}'
+  version_elapsed="$RPC_ELAPSED"
+  version_data="$RPC_RESULT"
+  if [ -n "$version_data" ] && [ "$version_data" != "null" ]; then
+    op_version=$(echo "$version_data" | jq -r '.result // "-"')
+  fi
+  req_ms_version=$(echo "scale=0; $version_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  # Prefer aggregate peer stats first.
+  timed_rpc '{"jsonrpc":"2.0","method":"opp2p_peerStats","params":[],"id":1}'
+  peers_elapsed="$RPC_ELAPSED"
+  peers_data="$RPC_RESULT"
+  peers_connected=$(echo "$peers_data" | jq -r '.result.connected // "-"')
+  if ! is_uint "$peers_connected"; then
+    # Fallback for older/newer variants that expose totalConnected in opp2p_peers.
+    timed_rpc '{"jsonrpc":"2.0","method":"opp2p_peers","params":[true],"id":1}'
+    peers_elapsed=$(echo "$peers_elapsed + $RPC_ELAPSED" | bc -l 2>/dev/null || echo "$peers_elapsed")
+    peers_data="$RPC_RESULT"
+    peers_connected=$(echo "$peers_data" | jq -r '.result.totalConnected // "-"')
+  fi
+  req_ms_peers=$(echo "scale=0; $peers_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  log "\n"
+  printf "%-12s %-12s %-22s %-8s %-34s\n" "L1 Chain ID" "L2 Chain ID" "Version" "Peers" "ReqTime(ms)"
+  printf "%-12s %-12s %-22s %-8s %-34s\n" "------------" "------------" "----------------------" "--------" "----------------------------------"
+  printf "%-12s %-12s %-22s %-8s %-34s\n" "$l1_chain_id" "$l2_chain_id" "$op_version" "$peers_connected" "rollup:${req_ms_rollup} version:${req_ms_version} peers:${req_ms_peers}"
+
+  # Core sync status for op-node.
+  timed_rpc '{"jsonrpc":"2.0","method":"optimism_syncStatus","params":[],"id":1}'
+  sync_elapsed="$RPC_ELAPSED"
+  sync_data="$RPC_RESULT"
+  req_ms_sync=$(echo "scale=0; $sync_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  log "\n\nChecking op-node sync status... (took ${sync_elapsed}s)"
+  if [ -z "$sync_data" ] || [ "$sync_data" = "null" ]; then
+    echo "[ERROR] Failed to retrieve optimism_syncStatus"
+    return
+  fi
+
+  local sync_ok
+  sync_ok=$(echo "$sync_data" | jq -r 'if (.result | type) == "object" then "1" else "0" end' 2>/dev/null || echo "0")
+  if [ "$sync_ok" != "1" ]; then
+    echo "[ERROR] Invalid optimism_syncStatus response"
+    echo "$sync_data"
+    return
+  fi
+
+  declare -a OP_LABELS=("CurrentL1" "HeadL1" "SafeL1" "FinalizedL1" "UnsafeL2" "SafeL2" "FinalizedL2" "EngineTarget")
+  declare -a OP_KEYS=("current_l1" "head_l1" "safe_l1" "finalized_l1" "unsafe_l2" "safe_l2" "finalized_l2" "engine_sync_target")
+
+  log "\n"
+  printf "%-12s %-20s %-12s %-12s %-66s\n" "Row" "BlockTime" "Block Age" "Block(dec)" "BlockHash"
+  printf "%-12s %-20s %-12s %-12s %-66s\n" "------------" "--------------------" "------------" "------------" "------------------------------------------------------------------"
+
+  local i key label number hash ts block_time age
+  for i in "${!OP_KEYS[@]}"; do
+    key="${OP_KEYS[$i]}"
+    label="${OP_LABELS[$i]}"
+    number=$(echo "$sync_data" | jq -r ".result.${key}.number // \"-\"")
+    hash=$(echo "$sync_data" | jq -r ".result.${key}.hash // \"-\"")
+    ts=$(echo "$sync_data" | jq -r ".result.${key}.timestamp // \"0\"")
+
+    if is_uint "$ts" && [ "$ts" -gt 0 ]; then
+      block_time=$(timestamp_to_utc "$ts")
+      age=$(format_age "$ts")
+    else
+      block_time="-"
+      age="-"
+    fi
+
+    printf "%-12s %-20s %-12s %-12s %-66s\n" "$label" "$block_time" "$age" "$number" "$hash"
+  done
+
+  local head_l1_num current_l1_num unsafe_l2_num safe_l2_num
+  head_l1_num=$(echo "$sync_data" | jq -r '.result.head_l1.number // "-"')
+  current_l1_num=$(echo "$sync_data" | jq -r '.result.current_l1.number // "-"')
+  unsafe_l2_num=$(echo "$sync_data" | jq -r '.result.unsafe_l2.number // "-"')
+  safe_l2_num=$(echo "$sync_data" | jq -r '.result.safe_l2.number // "-"')
+
+  local l1_gap="-" l2_gap="-"
+  if is_uint "$head_l1_num" && is_uint "$current_l1_num" && [ "$head_l1_num" -ge "$current_l1_num" ]; then
+    l1_gap=$((head_l1_num - current_l1_num))
+  fi
+  if is_uint "$unsafe_l2_num" && is_uint "$safe_l2_num" && [ "$unsafe_l2_num" -ge "$safe_l2_num" ]; then
+    l2_gap=$((unsafe_l2_num - safe_l2_num))
+  fi
+
+  log "\nSync gaps: l1_head-current_l1=${l1_gap} blocks, l2_unsafe-safe=${l2_gap} blocks (optimism_syncStatus req=${req_ms_sync}ms)"
+}
+
 # Function to check a specific block by number
 check_block_by_number() {
   block_number=$1
@@ -534,6 +655,16 @@ monitor_loop() {
   done
 }
 
+# Monitor loop for OP-node checks.
+monitor_op_node_loop() {
+  while true; do
+    output=$(perform_op_node_checks 2>&1)
+    clear 2>/dev/null || true
+    echo "$output"
+    sleep 1
+  done
+}
+
 # Main logic
 if [ -z "$2" ]; then
   # No command provided: default to general_check
@@ -542,6 +673,10 @@ elif [ "$2" == "general_check" ]; then
   perform_checks
 elif [ "$2" == "monitor" ]; then
   monitor_loop
+elif [ "$2" == "op_node_check" ]; then
+  perform_op_node_checks
+elif [ "$2" == "op_monitor" ]; then
+  monitor_op_node_loop
 elif [ "$2" == "block_summary" ]; then
   if [ -z "$3" ]; then
     log "Error: Block number not provided."
