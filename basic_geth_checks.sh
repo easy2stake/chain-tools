@@ -20,6 +20,16 @@ timed_rpc() {
   RPC_ELAPSED=$(echo "$end - $start" | bc -l 2>/dev/null || echo "0")
 }
 
+# Execute HTTP GET call, sets HTTP_RESULT and HTTP_ELAPSED globals.
+timed_http_get() {
+  local endpoint=$1
+  local start end
+  start=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
+  HTTP_RESULT=$(curl -s -m 2 "$URL$endpoint")
+  end=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
+  HTTP_ELAPSED=$(echo "$end - $start" | bc -l 2>/dev/null || echo "0")
+}
+
 # Function to display usage information
 usage() {
   cat << EOF
@@ -31,6 +41,8 @@ Commands:
   monitor                        Same as general_check but loops every second (Ctrl+C to stop).
   op_node_check                  Perform OP node checks (peers, sync status, L1/L2 heads where available).
   op_monitor                     Same as op_node_check but loops every second (Ctrl+C to stop).
+  tendermint_check               Perform Tendermint/CometBFT checks (peers, catching_up, latest/earliest blocks).
+  tendermint_monitor             Same as tendermint_check but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -41,6 +53,8 @@ Examples:
   $0 8545 monitor
   $0 9545 op_node_check
   $0 9545 op_monitor
+  $0 26657 tendermint_check
+  $0 26657 tendermint_monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
@@ -121,8 +135,51 @@ safe_dec_to_hex() {
 
 # Function to convert Unix timestamp to UTC format
 timestamp_to_utc() {
-  unix_timestamp=$1
-  date -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ"
+  local unix_timestamp=$1
+  if date -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ" >/dev/null 2>&1; then
+    date -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ"
+  elif command -v gdate >/dev/null 2>&1; then
+    gdate -u -d "@$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ"
+  else
+    date -u -r "$unix_timestamp" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "-"
+  fi
+}
+
+# Convert RFC3339 timestamp to unix epoch seconds (returns 0 on parse failure).
+rfc3339_to_epoch() {
+  local ts=$1
+  python3 - "$ts" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+raw = (sys.argv[1] or "").strip()
+if not raw:
+    print(0)
+    raise SystemExit(0)
+
+try:
+    # Handle Z-form and up to nanoseconds by trimming to microseconds.
+    v = raw.replace("Z", "+00:00")
+    if "." in v:
+        base, rest = v.split(".", 1)
+        if "+" in rest:
+            frac, tz = rest.split("+", 1)
+            frac = (frac + "000000")[:6]
+            v = f"{base}.{frac}+{tz}"
+        elif "-" in rest:
+            frac, tz = rest.split("-", 1)
+            frac = (frac + "000000")[:6]
+            v = f"{base}.{frac}-{tz}"
+        else:
+            frac = (rest + "000000")[:6]
+            v = f"{base}.{frac}"
+    dt = datetime.fromisoformat(v)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    print(int(dt.timestamp()))
+except Exception:
+    print(0)
+PY
 }
 
 # Format seconds as human-readable duration (e.g. 125 -> "2m 5s")
@@ -531,6 +588,81 @@ perform_op_node_checks() {
   log "\nSync gaps: l1_head-current_l1=${l1_gap} blocks, l2_unsafe-safe=${l2_gap} blocks (optimism_syncStatus req=${req_ms_sync}ms)"
 }
 
+# Tendermint/CometBFT checks:
+# - /status for sync_info and node metadata
+# - /net_info for peer count and listener state
+perform_tendermint_checks() {
+  local status_data net_data status_elapsed net_elapsed
+  local req_ms_status req_ms_net
+  local network moniker version catching_up
+  local latest_height earliest_height latest_hash earliest_hash latest_time_raw earliest_time_raw
+  local latest_epoch earliest_epoch latest_time_utc earliest_time_utc
+  local peers listening
+
+  timed_http_get "/status"
+  status_data="$HTTP_RESULT"
+  status_elapsed="$HTTP_ELAPSED"
+  req_ms_status=$(echo "scale=0; $status_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  if [ -z "$status_data" ] || [ "$status_data" = "null" ]; then
+    echo "[ERROR] Failed to retrieve Tendermint status endpoint: $URL/status"
+    return
+  fi
+
+  timed_http_get "/net_info"
+  net_data="$HTTP_RESULT"
+  net_elapsed="$HTTP_ELAPSED"
+  req_ms_net=$(echo "scale=0; $net_elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  network=$(echo "$status_data" | jq -r '.result.node_info.network // "-"')
+  moniker=$(echo "$status_data" | jq -r '.result.node_info.moniker // "-"')
+  version=$(echo "$status_data" | jq -r '.result.node_info.version // "-"')
+  catching_up=$(echo "$status_data" | jq -r '.result.sync_info.catching_up // "-"')
+
+  peers=$(echo "$net_data" | jq -r '.result.n_peers // "-"')
+  listening=$(echo "$net_data" | jq -r '.result.listening // "-"')
+
+  latest_height=$(echo "$status_data" | jq -r '.result.sync_info.latest_block_height // "-"')
+  earliest_height=$(echo "$status_data" | jq -r '.result.sync_info.earliest_block_height // "-"')
+  latest_hash=$(echo "$status_data" | jq -r '.result.sync_info.latest_block_hash // "-"')
+  earliest_hash=$(echo "$status_data" | jq -r '.result.sync_info.earliest_block_hash // "-"')
+  latest_time_raw=$(echo "$status_data" | jq -r '.result.sync_info.latest_block_time // ""')
+  earliest_time_raw=$(echo "$status_data" | jq -r '.result.sync_info.earliest_block_time // ""')
+  latest_epoch=$(rfc3339_to_epoch "$latest_time_raw")
+  earliest_epoch=$(rfc3339_to_epoch "$earliest_time_raw")
+
+  if is_uint "$latest_epoch" && [ "$latest_epoch" -gt 0 ]; then
+    latest_time_utc=$(timestamp_to_utc "$latest_epoch")
+  else
+    latest_time_utc="-"
+  fi
+  if is_uint "$earliest_epoch" && [ "$earliest_epoch" -gt 0 ]; then
+    earliest_time_utc=$(timestamp_to_utc "$earliest_epoch")
+  else
+    earliest_time_utc="-"
+  fi
+
+  log "\n"
+  printf "%-24s %-22s %-10s %-8s %-10s %-28s\n" "Network" "Moniker" "Version" "Peers" "Listening" "ReqTime(ms)"
+  printf "%-24s %-22s %-10s %-8s %-10s %-28s\n" "------------------------" "----------------------" "----------" "--------" "----------" "----------------------------"
+  printf "%-24s %-22s %-10s %-8s %-10s %-28s\n" "$network" "$moniker" "$version" "$peers" "$listening" "status:${req_ms_status} net:${req_ms_net}"
+
+  log "\nSync status: catching_up=${catching_up}"
+
+  log "\n"
+  printf "%-10s %-20s %-12s %-12s %-66s\n" "Row" "BlockTime" "Block Age" "Height" "BlockHash"
+  printf "%-10s %-20s %-12s %-12s %-66s\n" "----------" "--------------------" "------------" "------------" "------------------------------------------------------------------"
+  printf "%-10s %-20s %-12s %-12s %-66s\n" "Latest" "$latest_time_utc" "$(format_age "$latest_epoch")" "$latest_height" "$latest_hash"
+  printf "%-10s %-20s %-12s %-12s %-66s\n" "Earliest" "$earliest_time_utc" "$(format_age "$earliest_epoch")" "$earliest_height" "$earliest_hash"
+
+  if is_uint "$latest_height"; then
+    print_blocks_per_sec "$latest_height" "$URL"
+  fi
+  if is_uint "$latest_epoch" && [ "$latest_epoch" -gt 0 ]; then
+    print_time_to_sync "$latest_epoch" "$URL"
+  fi
+}
+
 # Function to check a specific block by number
 check_block_by_number() {
   block_number=$1
@@ -665,6 +797,16 @@ monitor_op_node_loop() {
   done
 }
 
+# Monitor loop for Tendermint checks.
+monitor_tendermint_loop() {
+  while true; do
+    output=$(perform_tendermint_checks 2>&1)
+    clear 2>/dev/null || true
+    echo "$output"
+    sleep 1
+  done
+}
+
 # Main logic
 if [ -z "$2" ]; then
   # No command provided: default to general_check
@@ -677,6 +819,10 @@ elif [ "$2" == "op_node_check" ]; then
   perform_op_node_checks
 elif [ "$2" == "op_monitor" ]; then
   monitor_op_node_loop
+elif [ "$2" == "tendermint_check" ]; then
+  perform_tendermint_checks
+elif [ "$2" == "tendermint_monitor" ]; then
+  monitor_tendermint_loop
 elif [ "$2" == "block_summary" ]; then
   if [ -z "$3" ]; then
     log "Error: Block number not provided."
