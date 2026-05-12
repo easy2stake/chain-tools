@@ -39,10 +39,10 @@ Usage: $0 <full_url_or_port> <command> [command_options]
 Commands:
   general_check                  Perform all basic Geth checks (chain ID, peer count, sync status, blocks).
   monitor                        Same as general_check but loops every second (Ctrl+C to stop).
-  op_node_check                  Perform OP node checks (peers, sync status, L1/L2 heads where available).
-  op_monitor                     Same as op_node_check but loops every second (Ctrl+C to stop).
-  tendermint_check               Perform Tendermint/CometBFT checks (peers, catching_up, latest/earliest blocks).
-  tendermint_monitor             Same as tendermint_check but loops every second (Ctrl+C to stop).
+  op                             Perform OP node checks (peers, sync status, L1/L2 heads where available).
+  op_monitor                     Same as op but loops every second (Ctrl+C to stop).
+  tendermint                     Perform Tendermint/CometBFT checks (peers, catching_up, latest/earliest blocks).
+  tendermint_monitor             Same as tendermint but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -51,9 +51,9 @@ Commands:
 Examples:
   $0 8545 general_check
   $0 8545 monitor
-  $0 9545 op_node_check
+  $0 9545 op
   $0 9545 op_monitor
-  $0 26657 tendermint_check
+  $0 26657 tendermint
   $0 26657 tendermint_monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
@@ -815,11 +815,11 @@ elif [ "$2" == "general_check" ]; then
   perform_checks
 elif [ "$2" == "monitor" ]; then
   monitor_loop
-elif [ "$2" == "op_node_check" ]; then
+elif [ "$2" == "op" ]; then
   perform_op_node_checks
 elif [ "$2" == "op_monitor" ]; then
   monitor_op_node_loop
-elif [ "$2" == "tendermint_check" ]; then
+elif [ "$2" == "tendermint" ]; then
   perform_tendermint_checks
 elif [ "$2" == "tendermint_monitor" ]; then
   monitor_tendermint_loop
