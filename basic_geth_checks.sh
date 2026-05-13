@@ -752,9 +752,6 @@ perform_aptos_checks() {
   if is_uint "$ledger_epoch" && [ "$ledger_epoch" -gt 0 ]; then
     print_time_to_sync "$ledger_epoch" "$URL"
   fi
-
-  log "\nRaw JSON:"
-  echo "$data" | jq .
 }
 
 # Function to check a specific block by number
