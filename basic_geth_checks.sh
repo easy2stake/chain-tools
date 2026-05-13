@@ -43,7 +43,7 @@ Commands:
   op_monitor                     Same as op but loops every second (Ctrl+C to stop).
   tendermint                     Perform Tendermint/CometBFT checks (peers, catching_up, latest/earliest blocks).
   tendermint_monitor             Same as tendermint but loops every second (Ctrl+C to stop).
-  aptos                          Aptos fullnode REST checks (GET /v1: ledger time, versions, block heights, metadata).
+  aptos                          Aptos REST ledger/info GET — pass full URL (including path, e.g. .../v1).
   aptos_monitor                  Same as aptos but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
@@ -57,8 +57,8 @@ Examples:
   $0 9545 op_monitor
   $0 26657 tendermint
   $0 26657 tendermint_monitor
-  $0 8080 aptos
-  $0 http://127.0.0.1:8080 aptos_monitor
+  $0 http://127.0.0.1:8080/v1 aptos
+  $0 http://127.0.0.1:8080/v1 aptos_monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
@@ -186,7 +186,7 @@ except Exception:
 PY
 }
 
-# Aptos ledger_timestamp is microseconds since Unix epoch (REST GET /v1).
+# Aptos ledger_timestamp is microseconds since Unix epoch (REST ledger info response).
 aptos_ledger_micro_to_epoch() {
   local micro=$1
   python3 - "$micro" <<'PY'
@@ -680,20 +680,20 @@ perform_tendermint_checks() {
   fi
 }
 
-# Aptos fullnode REST — GET /v1 returns chain_id, epoch, ledger versions, ledger_timestamp
-# (microseconds since Unix epoch), block heights, node_role, git_hash, etc.
+# Aptos REST ledger/info — URL arg must be the full GET target (path included); returns chain_id, epoch,
+# ledger versions, ledger_timestamp (microseconds since Unix epoch), block heights, node_role, git_hash, etc.
 perform_aptos_checks() {
   local data req_ms
   local chain_id epoch ledger_ver oldest_ledger ledger_ts_micro ledger_epoch
   local node_role oldest_bh block_height git_hash enc_key
   local ledger_ts_utc ledger_span bh_span
 
-  timed_http_get "/v1"
+  timed_http_get ""
   data="$HTTP_RESULT"
   req_ms=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
 
   if [ -z "$data" ] || ! echo "$data" | jq -e . >/dev/null 2>&1; then
-    echo "[ERROR] Failed to retrieve Aptos /v1 endpoint: $URL/v1"
+    echo "[ERROR] Failed to retrieve Aptos ledger endpoint: $URL"
     return
   fi
 
@@ -753,7 +753,7 @@ perform_aptos_checks() {
     print_time_to_sync "$ledger_epoch" "$URL"
   fi
 
-  log "\nRaw /v1 JSON:"
+  log "\nRaw JSON:"
   echo "$data" | jq .
 }
 
