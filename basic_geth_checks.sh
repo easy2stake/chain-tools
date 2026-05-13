@@ -43,6 +43,8 @@ Commands:
   op_monitor                     Same as op but loops every second (Ctrl+C to stop).
   tendermint                     Perform Tendermint/CometBFT checks (peers, catching_up, latest/earliest blocks).
   tendermint_monitor             Same as tendermint but loops every second (Ctrl+C to stop).
+  aptos                          Aptos fullnode REST checks (GET /v1: ledger time, versions, block heights, metadata).
+  aptos_monitor                  Same as aptos but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -55,6 +57,8 @@ Examples:
   $0 9545 op_monitor
   $0 26657 tendermint
   $0 26657 tendermint_monitor
+  $0 8080 aptos
+  $0 http://127.0.0.1:8080 aptos_monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
@@ -179,6 +183,19 @@ try:
     print(int(dt.timestamp()))
 except Exception:
     print(0)
+PY
+}
+
+# Aptos ledger_timestamp is microseconds since Unix epoch (REST GET /v1).
+aptos_ledger_micro_to_epoch() {
+  local micro=$1
+  python3 - "$micro" <<'PY'
+import sys
+raw = (sys.argv[1] or "").strip().strip('"')
+if not raw or not raw.isdigit():
+    print(0)
+else:
+    print(int(raw) // 1_000_000)
 PY
 }
 
@@ -663,6 +680,83 @@ perform_tendermint_checks() {
   fi
 }
 
+# Aptos fullnode REST — GET /v1 returns chain_id, epoch, ledger versions, ledger_timestamp
+# (microseconds since Unix epoch), block heights, node_role, git_hash, etc.
+perform_aptos_checks() {
+  local data req_ms
+  local chain_id epoch ledger_ver oldest_ledger ledger_ts_micro ledger_epoch
+  local node_role oldest_bh block_height git_hash enc_key
+  local ledger_ts_utc ledger_span bh_span
+
+  timed_http_get "/v1"
+  data="$HTTP_RESULT"
+  req_ms=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  if [ -z "$data" ] || ! echo "$data" | jq -e . >/dev/null 2>&1; then
+    echo "[ERROR] Failed to retrieve Aptos /v1 endpoint: $URL/v1"
+    return
+  fi
+
+  chain_id=$(echo "$data" | jq -r '.chain_id // "-"')
+  epoch=$(echo "$data" | jq -r '(.epoch // "-") | tostring')
+  ledger_ver=$(echo "$data" | jq -r '(.ledger_version // "-") | tostring')
+  oldest_ledger=$(echo "$data" | jq -r '(.oldest_ledger_version // "-") | tostring')
+  ledger_ts_micro=$(echo "$data" | jq -r 'if (.ledger_timestamp | type) == "null" or .ledger_timestamp == null then empty else (.ledger_timestamp | tostring) end')
+  node_role=$(echo "$data" | jq -r '.node_role // "-"')
+  oldest_bh=$(echo "$data" | jq -r '(.oldest_block_height // "-") | tostring')
+  block_height=$(echo "$data" | jq -r '(.block_height // "-") | tostring')
+  git_hash=$(echo "$data" | jq -r '.git_hash // "-"')
+  enc_key=$(echo "$data" | jq -r 'if .encryption_key == null then "null" else (.encryption_key | tostring) end')
+
+  ledger_epoch=$(aptos_ledger_micro_to_epoch "$ledger_ts_micro")
+
+  if is_uint "$ledger_epoch" && [ "$ledger_epoch" -gt 0 ]; then
+    ledger_ts_utc=$(timestamp_to_utc "$ledger_epoch")
+  else
+    ledger_ts_utc="-"
+  fi
+
+  ledger_span="-"
+  if is_uint "$ledger_ver" && is_uint "$oldest_ledger" && [ "$ledger_ver" -ge "$oldest_ledger" ]; then
+    ledger_span=$((ledger_ver - oldest_ledger))
+  fi
+
+  bh_span="-"
+  if is_uint "$block_height" && is_uint "$oldest_bh" && [ "$block_height" -ge "$oldest_bh" ]; then
+    bh_span=$((block_height - oldest_bh))
+  fi
+
+  log "\n"
+  printf "%-12s %-16s %-24s %-44s %-14s\n" "Chain ID" "Epoch" "Node role" "Git hash" "ReqTime(ms)"
+  printf "%-12s %-16s %-24s %-44s %-14s\n" "------------" "----------------" "------------------------" "--------------------------------------------" "--------------"
+  printf "%-12s %-16s %-24s %-44s %-14s\n" "$chain_id" "$epoch" "$node_role" "$git_hash" "$req_ms"
+
+  log "\nLedger head (ledger_timestamp drives chain time / age below):"
+  printf "%-14s %-22s %-16s %-22s %-28s\n" "Row" "Ledger time (UTC)" "Ledger age" "Ledger version" "(micro timestamp)"
+  printf "%-14s %-22s %-16s %-22s %-28s\n" "--------------" "----------------------" "----------------" "----------------------" "----------------------------"
+  printf "%-14s %-22s %-16s %-22s %-28s\n" "Head" "$ledger_ts_utc" "$(format_age "$ledger_epoch")" "$ledger_ver" "${ledger_ts_micro:--}"
+
+  log "\nBlock heights (pruning window on node):"
+  printf "%-14s %-22s %-22s %-14s\n" "Row" "Block height" "Oldest block height" "Span"
+  printf "%-14s %-22s %-22s %-14s\n" "--------------" "----------------------" "----------------------" "--------------"
+  printf "%-14s %-22s %-22s %-14s\n" "Range" "$block_height" "$oldest_bh" "$bh_span"
+
+  log "\nLedger versions & extras:"
+  echo "  oldest_ledger_version: $oldest_ledger"
+  echo "  ledger_version_span (head - oldest): $ledger_span"
+  echo "  encryption_key: $enc_key"
+
+  if is_uint "$block_height"; then
+    print_blocks_per_sec "$block_height" "$URL"
+  fi
+  if is_uint "$ledger_epoch" && [ "$ledger_epoch" -gt 0 ]; then
+    print_time_to_sync "$ledger_epoch" "$URL"
+  fi
+
+  log "\nRaw /v1 JSON:"
+  echo "$data" | jq .
+}
+
 # Function to check a specific block by number
 check_block_by_number() {
   block_number=$1
@@ -807,6 +901,15 @@ monitor_tendermint_loop() {
   done
 }
 
+monitor_aptos_loop() {
+  while true; do
+    output=$(perform_aptos_checks 2>&1)
+    clear 2>/dev/null || true
+    echo "$output"
+    sleep 1
+  done
+}
+
 # Main logic
 if [ -z "$2" ]; then
   # No command provided: default to general_check
@@ -823,6 +926,10 @@ elif [ "$2" == "tendermint" ]; then
   perform_tendermint_checks
 elif [ "$2" == "tendermint_monitor" ]; then
   monitor_tendermint_loop
+elif [ "$2" == "aptos" ]; then
+  perform_aptos_checks
+elif [ "$2" == "aptos_monitor" ]; then
+  monitor_aptos_loop
 elif [ "$2" == "block_summary" ]; then
   if [ -z "$3" ]; then
     log "Error: Block number not provided."
