@@ -347,6 +347,154 @@ print_time_to_sync() {
   log "\nTime to sync: $eta"
 }
 
+# Canonical Reth pipeline stage order for display sorting.
+RETH_STAGE_ORDER=(
+  Era Headers Header Bodies Body SenderRecovery Execution
+  PruneSenderRecovery MerkleUnwind AccountHashing StorageHashing MerkleExecute
+  TransactionLookup IndexStorageHistory IndexAccountHistory Prune Finish
+)
+
+# Return sort index for a Reth stage name (lower = earlier in pipeline).
+reth_stage_sort_key() {
+  local name=$1
+  local i
+  for i in "${!RETH_STAGE_ORDER[@]}"; do
+    if [ "${RETH_STAGE_ORDER[$i]}" = "$name" ]; then
+      echo "$i"
+      return
+    fi
+  done
+  echo "999"
+}
+
+# Format eth_syncing RPC response: Reth stages table or Geth-style summary.
+print_sync_status() {
+  local sync_data=$1
+  local elapsed=${2:-}
+  local req_ms=""
+
+  if [ -n "$elapsed" ]; then
+    req_ms=$(echo "scale=0; $elapsed * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+  fi
+
+  if [ -z "$sync_data" ] || [ "$sync_data" = "null" ]; then
+    echo "[ERROR] Failed to retrieve sync status"
+    return
+  fi
+
+  local result_type
+  result_type=$(echo "$sync_data" | jq -r '.result | type' 2>/dev/null || echo "null")
+  if [ "$result_type" = "null" ] || [ "$result_type" = "invalid" ]; then
+    echo "[ERROR] Failed to retrieve sync status"
+    return
+  fi
+
+  if [ "$result_type" = "boolean" ]; then
+    if [ -n "$req_ms" ] && [ "$req_ms" != "-" ]; then
+      log "Sync status: synced (req ${req_ms}ms)"
+    else
+      log "Sync status: synced"
+    fi
+    log "  (eth_syncing=false; Reth may report this before sync fully completes)"
+    return
+  fi
+
+  local starting current highest
+  starting=$(echo "$sync_data" | jq -r '.result.startingBlock // .result.starting_block // empty')
+  current=$(echo "$sync_data" | jq -r '.result.currentBlock // .result.current_block // empty')
+  highest=$(echo "$sync_data" | jq -r '.result.highestBlock // .result.highest_block // empty')
+
+  local starting_dec current_dec highest_dec
+  starting_dec=$(safe_hex_to_dec "$starting")
+  current_dec=$(safe_hex_to_dec "$current")
+  highest_dec=$(safe_hex_to_dec "$highest")
+
+  local stages_count
+  stages_count=$(echo "$sync_data" | jq -r 'if (.result.stages | type) == "array" then (.result.stages | length) else 0 end' 2>/dev/null || echo "0")
+
+  if [ "$stages_count" -gt 0 ]; then
+    # Reth-style: pipeline stages table
+    if [ -n "$req_ms" ] && [ "$req_ms" != "-" ]; then
+      log "Sync status: syncing (req ${req_ms}ms)"
+    else
+      log "Sync status: syncing"
+    fi
+    log "  starting: ${starting_dec}  current: ${current_dec}  highest: ${highest_dec}"
+
+    local ref_height=0 block_dec stage_name stage_block stage_hex sort_key
+    local active_name="" active_dec=""
+    local tmp_stages
+    tmp_stages=$(mktemp)
+
+    while IFS=$'\t' read -r stage_name stage_block; do
+      [ -z "$stage_name" ] && continue
+      block_dec=$(safe_hex_to_dec "$stage_block")
+      if is_uint "$block_dec" && [ "$block_dec" -gt "$ref_height" ]; then
+        ref_height=$block_dec
+      fi
+      if [ "$stage_name" != "Finish" ]; then
+        if [ -z "$active_name" ] || [ "$block_dec" -lt "$active_dec" ]; then
+          active_name="$stage_name"
+          active_dec=$block_dec
+        fi
+      fi
+      sort_key=$(reth_stage_sort_key "$stage_name")
+      printf "%04d\t%s\t%s\t%s\n" "$sort_key" "$stage_name" "$stage_block" "$block_dec" >> "$tmp_stages"
+    done < <(echo "$sync_data" | jq -r '.result.stages[] | [.name, .block] | @tsv' 2>/dev/null)
+
+    if is_uint "$highest_dec" && [ "$highest_dec" -gt "$ref_height" ]; then
+      ref_height=$highest_dec
+    fi
+
+    if [ -n "$active_name" ]; then
+      log "  active stage: ${active_name} (block ${active_dec})"
+    fi
+
+    log ""
+    printf "%-24s %-14s %-14s %-12s\n" "Stage" "Block (hex)" "Block (dec)" "vs highest"
+    printf "%-24s %-14s %-14s %-12s\n" "------------------------" "--------------" "--------------" "------------"
+
+    local pct label
+    while IFS=$'\t' read -r _ stage_name stage_block block_dec; do
+      [ -z "$stage_name" ] && continue
+      label="$stage_name"
+      if [ "$stage_name" = "$active_name" ]; then
+        label="${stage_name} *"
+      fi
+      pct="-"
+      if is_uint "$ref_height" && [ "$ref_height" -gt 0 ] && is_uint "$block_dec"; then
+        pct=$(echo "scale=2; 100 * $block_dec / $ref_height" | bc -l 2>/dev/null || echo "-")
+        pct="${pct}%"
+      fi
+      printf "%-24s %-14s %-14s %-12s\n" "$label" "$stage_block" "$block_dec" "$pct"
+    done < <(sort -t $'\t' -k1,1n -k2,2 "$tmp_stages" 2>/dev/null)
+
+    rm -f "$tmp_stages"
+    return
+  fi
+
+  # Geth / Erigon-style summary (no stages array)
+  if [ -n "$req_ms" ] && [ "$req_ms" != "-" ]; then
+    log "Sync status: syncing (req ${req_ms}ms)"
+  else
+    log "Sync status: syncing"
+  fi
+
+  local pct="-"
+  if is_uint "$highest_dec" && [ "$highest_dec" -gt 0 ] && is_uint "$current_dec"; then
+    pct=$(echo "scale=2; 100 * $current_dec / $highest_dec" | bc -l 2>/dev/null || echo "-")
+    pct="${pct}%"
+  fi
+
+  log "  starting: ${starting:-} (${starting_dec})  current: ${current:-} (${current_dec})  highest: ${highest:-} (${highest_dec})  progress: ${pct}"
+
+  local has_healing
+  has_healing=$(echo "$sync_data" | jq -r 'if (.result | has("healedTrienodes")) or (.result | has("syncedAccounts")) then "1" else "0" end' 2>/dev/null || echo "0")
+  if [ "$has_healing" = "1" ]; then
+    log "  (snap-sync / state-healing fields present; see eth_syncing for full detail)"
+  fi
+}
+
 # Resolve chain identity for display: EVM uses eth_chainId (hex + decimal);
 # Substrate-style nodes (e.g. Bittensor) often omit eth_chainId — use system_chain name instead.
 # Sets CHAIN_RPC_MODE to evm or substrate (drives block RPC in perform_checks).
@@ -400,12 +548,8 @@ perform_checks() {
 
   # Sync status check
   timed_rpc '{"jsonrpc":"2.0","method":"eth_syncing","params": [],"id":1}'
-  log "\n\nChecking sync status... (took ${RPC_ELAPSED}s)"
-  if [ -z "$RPC_RESULT" ] || [ "$RPC_RESULT" == "null" ]; then
-    echo "[ERROR] Failed to retrieve sync status"
-  else
-    echo "$RPC_RESULT"
-  fi
+  log "\n"
+  print_sync_status "$RPC_RESULT" "$RPC_ELAPSED"
 
   # Block checks: latest, safe, finalized, earliest
   declare -a BT_LABELS=("Latest" "Safe" "Finalized" "Earliest")
