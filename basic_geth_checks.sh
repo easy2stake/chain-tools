@@ -421,7 +421,7 @@ print_sync_status() {
     fi
     log "  starting: ${starting_dec}  current: ${current_dec}  highest: ${highest_dec}"
 
-    local ref_height=0 block_dec stage_name stage_block stage_hex sort_key
+    local ref_height=0 stage_max=0 max_key=-1 block_dec stage_name stage_block sort_key
     local active_name="" active_dec=""
     local tmp_stages
     tmp_stages=$(mktemp)
@@ -429,21 +429,42 @@ print_sync_status() {
     while IFS=$'\t' read -r stage_name stage_block; do
       [ -z "$stage_name" ] && continue
       block_dec=$(safe_hex_to_dec "$stage_block")
-      if is_uint "$block_dec" && [ "$block_dec" -gt "$ref_height" ]; then
-        ref_height=$block_dec
-      fi
-      if [ "$stage_name" != "Finish" ]; then
-        if [ -z "$active_name" ] || [ "$block_dec" -lt "$active_dec" ]; then
-          active_name="$stage_name"
-          active_dec=$block_dec
-        fi
-      fi
       sort_key=$(reth_stage_sort_key "$stage_name")
+      if is_uint "$block_dec" && [ "$block_dec" -ge "$stage_max" ]; then
+        # Track the furthest-along stage; on ties keep the latest pipeline position.
+        if [ "$block_dec" -gt "$stage_max" ]; then
+          max_key=$sort_key
+        elif [ "$sort_key" -gt "$max_key" ]; then
+          max_key=$sort_key
+        fi
+        stage_max=$block_dec
+      fi
       printf "%04d\t%s\t%s\t%s\n" "$sort_key" "$stage_name" "$stage_block" "$block_dec" >> "$tmp_stages"
     done < <(echo "$sync_data" | jq -r '.result.stages[] | [.name, .block] | @tsv' 2>/dev/null)
 
+    ref_height=$stage_max
     if is_uint "$highest_dec" && [ "$highest_dec" -gt "$ref_height" ]; then
       ref_height=$highest_dec
+    fi
+
+    # Active stage: Reth's pipeline runs stages in order, so the one currently
+    # running is the first stage (in pipeline order) still behind the
+    # furthest-along stage. Era (optional pre-merge import), MerkleUnwind
+    # (runs only on unwinds) and Finish are never reported as active.
+    if [ "$stage_max" -gt 0 ]; then
+      while IFS=$'\t' read -r sort_key stage_name stage_block block_dec; do
+        [ -z "$stage_name" ] && continue
+        case "$stage_name" in Era|MerkleUnwind|Finish) continue ;; esac
+        is_uint "$block_dec" || continue
+        if [ $((10#$sort_key)) -gt "$max_key" ] && [ "$block_dec" -lt "$stage_max" ]; then
+          active_name="$stage_name"
+          active_dec=$block_dec
+          break
+        fi
+      done < <(sort -t $'\t' -k1,1n -k2,2 "$tmp_stages" 2>/dev/null)
+    elif is_uint "$highest_dec" && [ "$highest_dec" -gt 0 ]; then
+      active_name="Headers"
+      active_dec=0
     fi
 
     if [ -n "$active_name" ]; then
