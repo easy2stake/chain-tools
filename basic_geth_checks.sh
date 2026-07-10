@@ -10,24 +10,29 @@ log() {
   echo -e "$1"
 }
 
-# Execute RPC call, sets RPC_RESULT and RPC_ELAPSED globals (must be called in current shell)
+# Execute RPC call, sets RPC_RESULT and RPC_ELAPSED globals (must be called in current shell).
+# Timing uses curl's %{time_total} so only the HTTP request is measured
+# (external timestamp processes added ~150ms of startup overhead per call).
 timed_rpc() {
   local payload=$1
-  local start end
-  start=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-  RPC_RESULT=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d "$payload" "$URL")
-  end=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-  RPC_ELAPSED=$(echo "$end - $start" | bc -l 2>/dev/null || echo "0")
+  local raw
+  raw=$(curl -s -X POST -H "Content-Type: application/json" -m 2 -d "$payload" -w '\n%{time_total}' "$URL")
+  RPC_ELAPSED=$(printf '%s' "$raw" | tail -n 1)
+  RPC_RESULT=$(printf '%s' "$raw" | sed '$d')
+  # Old curl versions format time_total with a locale decimal comma.
+  RPC_ELAPSED=${RPC_ELAPSED/,/.}
+  [[ "$RPC_ELAPSED" =~ ^[0-9.]+$ ]] || RPC_ELAPSED=0
 }
 
 # Execute HTTP GET call, sets HTTP_RESULT and HTTP_ELAPSED globals.
 timed_http_get() {
   local endpoint=$1
-  local start end
-  start=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-  HTTP_RESULT=$(curl -s -m 2 "$URL$endpoint")
-  end=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-  HTTP_ELAPSED=$(echo "$end - $start" | bc -l 2>/dev/null || echo "0")
+  local raw
+  raw=$(curl -s -m 2 -w '\n%{time_total}' "$URL$endpoint")
+  HTTP_ELAPSED=$(printf '%s' "$raw" | tail -n 1)
+  HTTP_RESULT=$(printf '%s' "$raw" | sed '$d')
+  HTTP_ELAPSED=${HTTP_ELAPSED/,/.}
+  [[ "$HTTP_ELAPSED" =~ ^[0-9.]+$ ]] || HTTP_ELAPSED=0
 }
 
 # Function to display usage information
@@ -1019,11 +1024,9 @@ get_balance() {
 
 # New function to extract consensus layer PRYSM peers
 get_prysm_peers() {
-  local start end
-  start=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-  peers=$(curl -s "$URL/eth/v1/node/peers" | jq -r '.data[].enr')
-  end=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-  RPC_ELAPSED=$(echo "$end - $start" | bc -l 2>/dev/null || echo "0")
+  timed_http_get "/eth/v1/node/peers"
+  RPC_ELAPSED="$HTTP_ELAPSED"
+  peers=$(echo "$HTTP_RESULT" | jq -r '.data[].enr')
   log "\nFetching PRYSM peers from consensus layer... (took ${RPC_ELAPSED}s)"
   if [ -z "$peers" ]; then
     echo "[ERROR] No peers found or error retrieving peers."
