@@ -96,6 +96,17 @@ fi
 # Log the start of the process
 log "Starting Geth checks on URL: $URL"
 
+# Per-run state dir (blocks/sec + sync ETA). Avoids /tmp permission clashes when
+# the same endpoint is checked by different users (e.g. root vs non-root).
+GETH_CHECKS_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/geth_checks.${UID}.XXXXXX") || {
+  log "Error: failed to create state directory"
+  exit 1
+}
+cleanup_geth_checks_state() {
+  rm -rf "$GETH_CHECKS_STATE_DIR"
+}
+trap cleanup_geth_checks_state EXIT
+
 # Function to fetch and parse block data; outputs "ELAPSED:X.XXX" on first line, then JSON (for subshell calls)
 get_block_data() {
   block_number=$1
@@ -242,14 +253,11 @@ is_uint() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-# Blocks/sec from latest block increments (persisted in /tmp for watch -n1)
+# Blocks/sec from latest block increments (persisted per script run for monitor loops).
 # Keeps a 60s rolling window of (timestamp, block) samples for a smoother average.
-# Second arg is endpoint (URL or port) so each chain has its own state file.
 print_blocks_per_sec() {
   local latest_block=$1
-  local endpoint=${2:-default}
-  local suffix=$(echo "$endpoint" | tr -c '[:alnum:]' '_')
-  local RATE_FILE="/tmp/geth_block_rate_${suffix}.tmp"
+  local RATE_FILE="${GETH_CHECKS_STATE_DIR}/block_rate.tmp"
   local now=$(date +%s)
   local bps="-"
   local window_sec=60
@@ -296,9 +304,7 @@ print_blocks_per_sec() {
 # Time to sync = gap / (catch_up_rate - 1) where gap = now - block_ts.
 print_time_to_sync() {
   local block_ts=$1
-  local endpoint=${2:-default}
-  local suffix=$(echo "$endpoint" | tr -c '[:alnum:]' '_')
-  local SYNC_FILE="/tmp/geth_sync_eta_${suffix}.tmp"
+  local SYNC_FILE="${GETH_CHECKS_STATE_DIR}/sync_eta.tmp"
   local now=$(date +%s)
   local eta="-"
   local window_sec=60
@@ -657,9 +663,9 @@ perform_checks() {
     printf "%-10s %-20s %-12s %-12s %-10s %-66s %-10s\n" "${BT_LABELS[$i]}" "${BT_TIME[$i]}" "$age" "${BT_HEX[$i]}" "${BT_DEC[$i]}" "${BT_HASH[$i]}" "${BT_MS[$i]}"
   done
 
-  print_blocks_per_sec "${BT_DEC[0]}" "$URL"
+  print_blocks_per_sec "${BT_DEC[0]}"
   if [ -n "${BT_TS[0]}" ] && [ "${BT_TS[0]}" != "0" ]; then
-    print_time_to_sync "${BT_TS[0]}" "$URL"
+    print_time_to_sync "${BT_TS[0]}"
   fi
 }
 
@@ -843,10 +849,10 @@ perform_tendermint_checks() {
   printf "%-10s %-20s %-12s %-12s %-66s\n" "Earliest" "$earliest_time_utc" "$(format_age "$earliest_epoch")" "$earliest_height" "$earliest_hash"
 
   if is_uint "$latest_height"; then
-    print_blocks_per_sec "$latest_height" "$URL"
+    print_blocks_per_sec "$latest_height"
   fi
   if is_uint "$latest_epoch" && [ "$latest_epoch" -gt 0 ]; then
-    print_time_to_sync "$latest_epoch" "$URL"
+    print_time_to_sync "$latest_epoch"
   fi
 }
 
@@ -917,10 +923,10 @@ perform_aptos_checks() {
   echo "  encryption_key: $enc_key"
 
   if is_uint "$block_height"; then
-    print_blocks_per_sec "$block_height" "$URL"
+    print_blocks_per_sec "$block_height"
   fi
   if is_uint "$ledger_epoch" && [ "$ledger_epoch" -gt 0 ]; then
-    print_time_to_sync "$ledger_epoch" "$URL"
+    print_time_to_sync "$ledger_epoch"
   fi
 }
 
