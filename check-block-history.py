@@ -26,6 +26,15 @@ CYAN = "\033[0;36m"
 NC = "\033[0m"
 
 
+def normalize_rpc_url(url: str) -> str:
+    """If only a port is given, default to 127.0.0.1:port; add http:// when omitted."""
+    if url.isdigit():
+        url = f"127.0.0.1:{url}"
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    return url
+
+
 def parse_args() -> argparse.Namespace:
     script = sys.argv[0].split("/")[-1]
     parser = argparse.ArgumentParser(
@@ -50,13 +59,14 @@ def parse_args() -> argparse.Namespace:
 
 Examples:
   %(prog)s http://localhost:8545
-  %(prog)s http://localhost:8745
-  %(prog)s -t 5 localhost:8545""",
+  %(prog)s localhost:8545
+  %(prog)s 8545
+  %(prog)s -t 5 8545""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "rpc_url",
-        help="JSON-RPC endpoint (http:// is added if omitted)",
+        help="JSON-RPC endpoint (port only, host:port, or full http(s) URL)",
     )
     parser.add_argument(
         "-t", "--timeout",
@@ -77,11 +87,9 @@ Examples:
 
 
 _args = parse_args()
-RPC_URL = _args.rpc_url
+RPC_URL = normalize_rpc_url(_args.rpc_url)
 VERBOSE = _args.verbose
 TIMEOUT = _args.timeout
-if not RPC_URL.startswith(("http://", "https://")):
-    RPC_URL = "http://" + RPC_URL
 
 
 def _record_rpc_time(method: str, elapsed_sec: float) -> None:
