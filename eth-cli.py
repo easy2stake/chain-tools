@@ -52,6 +52,16 @@ def get_rpc_for_chain(chain_id: int) -> str:
             return env_val
     return DEFAULT_RPC_BY_CHAIN.get(chain_id, DEFAULT_RPC)
 
+
+def normalize_rpc_url(url: str) -> str:
+    """Port-only -> 127.0.0.1:port; host:port or bare host -> http:// prefix."""
+    url = url.strip()
+    if url.isdigit():
+        url = f"127.0.0.1:{url}"
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    return url
+
 # ERC20 token contracts by chain ID - (symbol, address, decimals)
 # Etherscan: https://etherscan.io/token/<addr> | Zircuit: https://explorer.zircuit.com | Moonbeam: https://moonscan.io
 TOKENS_BY_CHAIN: dict[int, list[tuple[str, str, int]]] = {
@@ -590,10 +600,10 @@ def check_block(block_arg: str) -> None:
 
 
 def print_help() -> None:
-    print("Usage: eth-cli.py balance <address> [--chain NAME] [--rpc URL]")
-    print("       eth-cli.py tx <tx_hash> [--chain NAME] [--rpc URL]")
-    print("       eth-cli.py mempool <tx_hash> [--chain NAME] [--rpc URL]")
-    print("       eth-cli.py block [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [--rpc URL]")
+    print("Usage: eth-cli.py balance <address> [--chain NAME] [-u URL]")
+    print("       eth-cli.py tx <tx_hash> [--chain NAME] [-u URL]")
+    print("       eth-cli.py mempool <tx_hash> [--chain NAME] [-u URL]")
+    print("       eth-cli.py block [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [-u URL]")
     print("")
     print("  balance   - Check native + token balances for address")
     print("  tx        - Query transaction by hash")
@@ -601,7 +611,8 @@ def print_help() -> None:
     print("  block     - Query block (default: latest)")
     print("             Args: latest, safe, finalized, pending, earliest, block number (int/hex), or block hash")
     print("  --chain   - Chain: eth, bsc, zircuit, moonbeam (uses default RPC for that chain)")
-    print("  --rpc     - RPC URL (overrides --chain default; else $ETH_RPC or Ethereum)")
+    print("  -u, --url - RPC endpoint (port, host:port, or full http(s) URL; overrides --chain)")
+    print("  --rpc     - Same as -u/--url")
     print("")
     print("  Env: ETH_CHAIN (chain when no --chain); ETH_RPC (fallback);")
     print("       ETH_RPC_ETH, ETH_RPC_ZIRCUIT, ETH_RPC_MOONBEAM (per-chain RPC overrides)")
@@ -624,7 +635,7 @@ def main():
         if args[i] == "--chain" and i + 1 < len(args):
             chain_arg = args[i + 1].lower()
             i += 2
-        elif args[i] == "--rpc" and i + 1 < len(args):
+        elif args[i] in ("--rpc", "-u", "--url") and i + 1 < len(args):
             rpc_arg = args[i + 1]
             i += 2
         elif args[i] == "balance":
@@ -658,9 +669,9 @@ def main():
         else:
             i += 1
 
-    # Apply chain/RPC: --rpc overrides; --chain uses chain RPC (env or default); else ETH_CHAIN or ETH_RPC
+    # Apply chain/RPC: -u/--url/--rpc overrides; --chain uses chain RPC (env or default); else ETH_CHAIN or ETH_RPC
     if rpc_arg:
-        RPC_URL = rpc_arg
+        RPC_URL = normalize_rpc_url(rpc_arg)
     else:
         chain_arg = chain_arg or os.environ.get("ETH_CHAIN", "").strip().lower()
         if chain_arg:
