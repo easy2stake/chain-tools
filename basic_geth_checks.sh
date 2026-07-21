@@ -35,6 +35,31 @@ timed_http_get() {
   [[ "$HTTP_ELAPSED" =~ ^[0-9.]+$ ]] || HTTP_ELAPSED=0
 }
 
+# Execute HTTP GET and capture status code (empty body), sets HTTP_STATUS and HTTP_ELAPSED.
+timed_http_get_code() {
+  local endpoint=$1
+  local raw
+  raw=$(curl -s -m 2 -o /dev/null -w '%{http_code}\n%{time_total}' "$URL$endpoint")
+  HTTP_STATUS=$(printf '%s' "$raw" | head -n 1)
+  HTTP_ELAPSED=$(printf '%s' "$raw" | tail -n 1)
+  HTTP_ELAPSED=${HTTP_ELAPSED/,/.}
+  [[ "$HTTP_ELAPSED" =~ ^[0-9.]+$ ]] || HTTP_ELAPSED=0
+}
+
+# Beacon REST API expects http(s):// base URL (default CL port 3500).
+normalize_beacon_url() {
+  if [[ "$URL" =~ ^[0-9]+$ ]]; then
+    URL="http://127.0.0.1:$URL"
+  elif [[ ! "$URL" =~ ^https?:// ]]; then
+    URL="http://$URL"
+  fi
+  URL="${URL%/}"
+}
+
+# Mainnet genesis time fallback when /eth/v1/beacon/genesis is unavailable.
+BEACON_GENESIS_TIME_MAINNET=1606824023
+BEACON_SLOT_SECONDS=12
+
 # Function to display usage information
 usage() {
   cat << EOF
@@ -50,6 +75,8 @@ Commands:
   tendermint_monitor             Same as tendermint but loops every second (Ctrl+C to stop).
   aptos                          Aptos REST ledger/info GET — pass full URL (including path, e.g. .../v1).
   aptos_monitor                  Same as aptos but loops every second (Ctrl+C to stop).
+  beacon                         Beacon/consensus layer checks (sync, peers, health, head slot, finality).
+  beacon_monitor                 Same as beacon but loops every second (Ctrl+C to stop).
   block_summary <block_number>   Fetch details of a specific block by its number.
   get_block <block_number>       Print the full block content for the specified block number.
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
@@ -64,6 +91,8 @@ Examples:
   $0 26657 tendermint_monitor
   $0 http://127.0.0.1:8080/v1 aptos
   $0 http://127.0.0.1:8080/v1 aptos_monitor
+  $0 3500 beacon
+  $0 http://127.0.0.1:3500 beacon_monitor
   $0 127.0.0.1:8545 block_summary <block_number>
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
@@ -930,6 +959,104 @@ perform_aptos_checks() {
   fi
 }
 
+# Beacon/consensus layer checks (Ethereum standard REST API):
+# - /eth/v1/node/syncing, peer_count, health, version
+# - /eth/v2/beacon/blocks/head for head slot
+# - /eth/v1/beacon/states/head/finality_checkpoints
+perform_beacon_checks() {
+  normalize_beacon_url
+
+  local sync_data peers_data head_data finality_data version_data genesis_data
+  local req_ms_sync req_ms_peers req_ms_health req_ms_head req_ms_finality req_ms_version
+  local is_syncing head_slot sync_distance peers_connected health_status health_label
+  local version version_req_ms genesis_time slot_ts slot_ts_utc slot_age
+  local justified_epoch finalized_epoch
+
+  timed_http_get "/eth/v1/beacon/genesis"
+  genesis_data="$HTTP_RESULT"
+  genesis_time=$(echo "$genesis_data" | jq -r '.data.genesis_time // empty' 2>/dev/null)
+  if ! is_uint "$genesis_time" || [ "$genesis_time" -eq 0 ]; then
+    genesis_time=$BEACON_GENESIS_TIME_MAINNET
+  fi
+
+  timed_http_get "/eth/v1/node/version"
+  version_data="$HTTP_RESULT"
+  req_ms_version=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+  version=$(echo "$version_data" | jq -r '.data.version // "-"')
+
+  timed_http_get "/eth/v1/node/syncing"
+  sync_data="$HTTP_RESULT"
+  req_ms_sync=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  if [ -z "$sync_data" ] || ! echo "$sync_data" | jq -e . >/dev/null 2>&1; then
+    echo "[ERROR] Failed to retrieve beacon syncing endpoint: $URL/eth/v1/node/syncing"
+    return
+  fi
+
+  timed_http_get "/eth/v1/node/peer_count"
+  peers_data="$HTTP_RESULT"
+  req_ms_peers=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  timed_http_get_code "/eth/v1/node/health"
+  req_ms_health=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+  health_status="$HTTP_STATUS"
+  case "$health_status" in
+    200) health_label="OK (synced)" ;;
+    206) health_label="Syncing" ;;
+    *) health_label="HTTP $health_status" ;;
+  esac
+
+  timed_http_get "/eth/v2/beacon/blocks/head"
+  head_data="$HTTP_RESULT"
+  req_ms_head=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  timed_http_get "/eth/v1/beacon/states/head/finality_checkpoints"
+  finality_data="$HTTP_RESULT"
+  req_ms_finality=$(echo "scale=0; $HTTP_ELAPSED * 1000 / 1" | bc -l 2>/dev/null || echo "-")
+
+  is_syncing=$(echo "$sync_data" | jq -r 'if (.data.is_syncing | type) == "boolean" then (.data.is_syncing | tostring) else "-" end')
+  head_slot=$(echo "$sync_data" | jq -r '.data.head_slot // "-"')
+  sync_distance=$(echo "$sync_data" | jq -r '.data.sync_distance // "-"')
+  peers_connected=$(echo "$peers_data" | jq -r '.data.connected // "-"')
+
+  if [ -z "$head_slot" ] || [ "$head_slot" = "-" ] || [ "$head_slot" = "null" ]; then
+    head_slot=$(echo "$head_data" | jq -r '.data.message.slot // "-"')
+  fi
+
+  justified_epoch=$(echo "$finality_data" | jq -r '.data.current_justified.epoch // .data.justified.epoch // "-"')
+  finalized_epoch=$(echo "$finality_data" | jq -r '.data.finalized.epoch // "-"')
+
+  slot_ts="-"
+  slot_ts_utc="-"
+  slot_age="-"
+  if is_uint "$head_slot"; then
+    slot_ts=$((genesis_time + head_slot * BEACON_SLOT_SECONDS))
+    slot_ts_utc=$(timestamp_to_utc "$slot_ts")
+    slot_age=$(format_age "$slot_ts")
+  fi
+
+  log "\n"
+  printf "%-36s %-14s %-12s %-14s %-28s\n" "Version" "Peers" "Health" "Syncing" "ReqTime(ms)"
+  printf "%-36s %-14s %-12s %-14s %-28s\n" "------------------------------------" "--------------" "------------" "--------------" "----------------------------"
+  printf "%-36s %-14s %-12s %-14s %-28s\n" "$version" "$peers_connected" "$health_label" "$is_syncing" "ver:${req_ms_version} sync:${req_ms_sync}"
+
+  log "\nSync status: is_syncing=${is_syncing}, head_slot=${head_slot}, sync_distance=${sync_distance}"
+  log "Finality: justified_epoch=${justified_epoch}, finalized_epoch=${finalized_epoch}"
+  log "Genesis time: ${genesis_time}"
+
+  log "\n"
+  printf "%-10s %-22s %-12s %-14s %-28s\n" "Row" "Slot time (UTC)" "Slot age" "Slot" "ReqTime(ms)"
+  printf "%-10s %-22s %-12s %-14s %-28s\n" "----------" "----------------------" "------------" "--------------" "----------------------------"
+  printf "%-10s %-22s %-12s %-14s %-28s\n" "Head" "$slot_ts_utc" "$slot_age" "$head_slot" "head:${req_ms_head} fin:${req_ms_finality} hc:${req_ms_health} peers:${req_ms_peers}"
+
+  if is_uint "$head_slot"; then
+    print_blocks_per_sec "$head_slot"
+  fi
+  if is_uint "$slot_ts" && [ "$slot_ts" -gt 0 ]; then
+    print_time_to_sync "$slot_ts"
+  fi
+}
+
 # Function to check a specific block by number
 check_block_by_number() {
   block_number=$1
@@ -1030,6 +1157,7 @@ get_balance() {
 
 # New function to extract consensus layer PRYSM peers
 get_prysm_peers() {
+  normalize_beacon_url
   timed_http_get "/eth/v1/node/peers"
   RPC_ELAPSED="$HTTP_ELAPSED"
   peers=$(echo "$HTTP_RESULT" | jq -r '.data[].enr')
@@ -1081,6 +1209,15 @@ monitor_aptos_loop() {
   done
 }
 
+monitor_beacon_loop() {
+  while true; do
+    output=$(perform_beacon_checks 2>&1)
+    clear 2>/dev/null || true
+    echo "$output"
+    sleep 1
+  done
+}
+
 # Main logic
 if [ -z "$2" ]; then
   # No command provided: default to general_check
@@ -1101,6 +1238,10 @@ elif [ "$2" == "aptos" ]; then
   perform_aptos_checks
 elif [ "$2" == "aptos_monitor" ]; then
   monitor_aptos_loop
+elif [ "$2" == "beacon" ]; then
+  perform_beacon_checks
+elif [ "$2" == "beacon_monitor" ]; then
+  monitor_beacon_loop
 elif [ "$2" == "block_summary" ]; then
   if [ -z "$3" ]; then
     log "Error: Block number not provided."
