@@ -279,6 +279,22 @@ def get_block_by_hash(block_hash: str, full_tx: bool = False) -> dict | None:
     return rpc_call("eth_getBlockByHash", [h, full_tx])
 
 
+def get_block_receipts(block_param: str) -> list | None:
+    """Get all transaction receipts for a block via eth_getBlockReceipts."""
+    return rpc_call("eth_getBlockReceipts", [block_param])
+
+
+def _block_query_param(block_arg: str) -> tuple[str, str, bool]:
+    """Return (rpc_param, display_label, is_hash) for a block argument."""
+    if _looks_like_block_hash(block_arg):
+        param = block_arg.strip()
+        if not param.startswith("0x"):
+            param = "0x" + param
+        return param, param, True
+    param = parse_block_arg(block_arg)
+    return param, param, False
+
+
 def _looks_like_block_hash(value: str) -> bool:
     """Return True if value looks like a 32-byte hex block hash."""
     s = value.strip().lower()
@@ -566,14 +582,11 @@ def check_mempool_tx(tx_hash: str) -> None:
 
 def check_block(block_arg: str) -> None:
     """Query and print block details."""
-    is_hash = _looks_like_block_hash(block_arg)
+    block_param, block_label, is_hash = _block_query_param(block_arg)
     if is_hash:
-        block = get_block_by_hash(block_arg)
-        block_label = block.get("hash", block_arg) if block else block_arg
+        block = get_block_by_hash(block_param)
     else:
-        block_param = parse_block_arg(block_arg)
         block = get_block(block_param)
-        block_label = block_param
     if not block:
         print("Block not found.", file=sys.stderr)
         sys.exit(1)
@@ -599,17 +612,58 @@ def check_block(block_arg: str) -> None:
     print(f"Tx Count:     {len(block.get('transactions', []))}")
 
 
+def check_block_receipts(block_arg: str) -> None:
+    """Query and print transaction receipts for a block (eth_getBlockReceipts)."""
+    block_param, block_label, is_hash = _block_query_param(block_arg)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_receipts = ex.submit(get_block_receipts, block_param)
+        f_chain = ex.submit(get_chain_id)
+        receipts, chain_id = f_receipts.result(), f_chain.result()
+
+    if receipts is None:
+        print("eth_getBlockReceipts failed (unsupported or block not found).", file=sys.stderr)
+        sys.exit(1)
+
+    if is_hash:
+        block = get_block_by_hash(block_param)
+    else:
+        block = get_block(block_param)
+
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+
+    print(f"Block: {block_label}")
+    if block:
+        num_int = int(block.get("number", "0x0"), 16)
+        print(f"Number: {num_int:,} (0x{num_int:x})")
+        print(f"Hash:   {block.get('hash', 'N/A')}")
+    print(f"Chain:  {chain_name} ({chain_id})")
+    print(f"RPC:    {RPC_URL}")
+    print("-" * 80)
+    print(f"Receipts: {len(receipts)}")
+
+    for i, receipt in enumerate(receipts):
+        status_ok = receipt.get("status") == "0x1"
+        status_str = "Success" if status_ok else "Failed"
+        gas_used = int(receipt.get("gasUsed", "0x0"), 16)
+        log_count = len(receipt.get("logs", []))
+        tx_hash = receipt.get("transactionHash", "N/A")
+        print(f"[{i}] {tx_hash}  {status_str}  gas: {gas_used:,}  logs: {log_count}")
+
+
 def print_help() -> None:
     print("Usage: eth-cli.py balance <address> [--chain NAME] [-u URL]")
     print("       eth-cli.py tx <tx_hash> [--chain NAME] [-u URL]")
     print("       eth-cli.py mempool <tx_hash> [--chain NAME] [-u URL]")
     print("       eth-cli.py block [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [-u URL]")
+    print("       eth-cli.py receipts [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [-u URL]")
     print("")
     print("  balance   - Check native + token balances for address")
     print("  tx        - Query transaction by hash")
     print("  mempool   - Check if transaction is pending in mempool")
     print("  block     - Query block (default: latest)")
     print("             Args: latest, safe, finalized, pending, earliest, block number (int/hex), or block hash")
+    print("  receipts  - List transaction receipts for a block (eth_getBlockReceipts; default: latest)")
     print("  --chain   - Chain: eth, bsc, zircuit, moonbeam (uses default RPC for that chain)")
     print("  -u, --url - RPC endpoint (port, host:port, or full http(s) URL; overrides --chain)")
     print("  --rpc     - Same as -u/--url")
@@ -666,6 +720,13 @@ def main():
                 i += 1
             else:
                 i += 2
+        elif args[i] == "receipts":
+            mode = "receipts"
+            target = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else "latest"
+            if target == "latest":
+                i += 1
+            else:
+                i += 2
         else:
             i += 1
 
@@ -687,6 +748,8 @@ def main():
 
     if mode == "block":
         check_block(target or "latest")
+    elif mode == "receipts":
+        check_block_receipts(target or "latest")
     elif mode == "mempool":
         if not target:
             print("Error: Transaction hash required.", file=sys.stderr)
