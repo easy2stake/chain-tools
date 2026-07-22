@@ -7,7 +7,10 @@ import argparse
 import json
 import sys
 import time
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Callable, Literal, Optional
+
+ProbeKind = Literal["skip", "error", "empty", "unavailable", "data"]
 
 # Per-method RPC timing (method -> list of response times in seconds)
 _rpc_timings: dict[str, list[float]] = {}
@@ -201,38 +204,136 @@ def _eth_get_logs_by_block_hash(block_hash: str):
     return (None, last_error)
 
 
-def logs_work_at_block(block_num: int) -> bool:
-    """Check if eth_getLogs works at this block (uses blockHash per EIP-234; pruned blocks return error)."""
-    works, _ = logs_probe_at_block(block_num)
-    return works
+@dataclass
+class ProbeResult:
+    """Result of probing index availability at a block height."""
+
+    works: bool  # method available (empty or data counts as works)
+    kind: ProbeKind
+    probed_block: Optional[int] = None
 
 
-def logs_probe_at_block(block_num: int) -> tuple[bool, bool]:
-    """Probe eth_getLogs at block. Returns (works, has_data); has_data means result was non-empty."""
-    result = rpc("eth_getBlockByNumber", hex(block_num), False)
-    if not result or "hash" not in result:
-        return (False, False)
-    block_hash = result["hash"]
-    logs_result, err = _eth_get_logs_by_block_hash(block_hash)
+@dataclass
+class ZoneSamples:
+    """Block numbers seen for each response kind during binary search (sampled, not exhaustive)."""
+
+    error: list[int] = field(default_factory=list)
+    empty: list[int] = field(default_factory=list)
+    unavailable: list[int] = field(default_factory=list)
+    data: list[int] = field(default_factory=list)
+
+    def record(self, result: ProbeResult) -> None:
+        if result.probed_block is None or result.kind == "skip":
+            return
+        bucket = getattr(self, result.kind)
+        bucket.append(result.probed_block)
+
+    def infer_zone_summary(self, current_dec: int) -> Optional[str]:
+        """Best-effort zone line: error | empty [] | with data (from probe samples)."""
+        error_hi = max(self.error + self.unavailable) if (self.error or self.unavailable) else None
+        empty_blocks = self.empty
+        data_lo = min(self.data) if self.data else None
+
+        if error_hi is None and not empty_blocks and data_lo is None:
+            return None
+
+        parts: list[str] = []
+        if error_hi is not None:
+            parts.append(f"1–{error_hi:,}: error/unavailable")
+        if empty_blocks:
+            empty_lo = (error_hi + 1) if error_hi is not None else min(empty_blocks)
+            empty_hi = max(empty_blocks)
+            if data_lo is not None:
+                empty_hi = min(empty_hi, data_lo - 1)
+            if empty_lo <= empty_hi:
+                parts.append(f"{empty_lo:,}–{empty_hi:,}: empty []")
+        if data_lo is not None:
+            parts.append(f"{data_lo:,}–{current_dec:,}: with data")
+        return " | ".join(parts) if parts else None
+
+    def format_details(self, current_dec: int) -> list[str]:
+        lines: list[str] = []
+        summary = self.infer_zone_summary(current_dec)
+        if summary:
+            lines.append(f"  Zones (sampled): {summary}")
+        if self.error:
+            lo, hi = min(self.error), max(self.error)
+            lines.append(f"  Error RPC:       blocks {lo:,}–{hi:,}")
+        if self.unavailable:
+            lo, hi = min(self.unavailable), max(self.unavailable)
+            lines.append(f"  Unavailable []:  blocks {lo:,}–{hi:,} (tx block, likely pruned)")
+        if self.empty:
+            lo, hi = min(self.empty), max(self.empty)
+            lines.append(f"  Empty []:        blocks {lo:,}–{hi:,} (RPC OK, no events)")
+        if self.data:
+            lo, hi = min(self.data), max(self.data)
+            lines.append(f"  With data:       blocks {lo:,}–{hi:,}")
+        return lines
+
+
+def logs_probe_at_block(
+    block_num: int, current_dec: int, radius: int = 20
+) -> ProbeResult:
+    """Probe eth_getLogs on a tx-bearing block near block_num."""
+    pair = get_tx_from_block_or_nearby(block_num, radius, current_dec)
+    if pair is None:
+        return ProbeResult(works=False, kind="skip", probed_block=None)
+
+    probed_block, _ = pair
+    block = rpc("eth_getBlockByNumber", hex(probed_block), False)
+    if not block or "hash" not in block:
+        return ProbeResult(works=False, kind="error", probed_block=probed_block)
+
+    logs_result, _err = _eth_get_logs_by_block_hash(block["hash"])
     if logs_result is None:
-        return (False, False)
-    has_data = isinstance(logs_result, list) and len(logs_result) > 0
-    return (True, has_data)
+        return ProbeResult(works=False, kind="error", probed_block=probed_block)
+
+    if isinstance(logs_result, list) and len(logs_result) > 0:
+        return ProbeResult(works=True, kind="data", probed_block=probed_block)
+
+    receipts = rpc("eth_getBlockReceipts", hex(probed_block))
+    if isinstance(receipts, list) and len(receipts) > 0:
+        return ProbeResult(works=True, kind="empty", probed_block=probed_block)
+
+    return ProbeResult(works=False, kind="unavailable", probed_block=probed_block)
 
 
-def block_receipts_work_at_block(block_num: int) -> bool:
-    """Check if eth_getBlockReceipts works at this block."""
-    works, _ = receipts_probe_at_block(block_num)
-    return works
+def receipts_probe_at_block(
+    block_num: int, current_dec: int, radius: int = 20
+) -> ProbeResult:
+    """Probe eth_getBlockReceipts on a tx-bearing block near block_num."""
+    pair = get_tx_from_block_or_nearby(block_num, radius, current_dec)
+    if pair is None:
+        return ProbeResult(works=False, kind="skip", probed_block=None)
 
-
-def receipts_probe_at_block(block_num: int) -> tuple[bool, bool]:
-    """Probe eth_getBlockReceipts at block. Returns (works, has_data); has_data means result was non-empty."""
-    result = rpc("eth_getBlockReceipts", hex(block_num))
+    probed_block, _ = pair
+    result = rpc("eth_getBlockReceipts", hex(probed_block))
     if result is None:
-        return (False, False)
-    has_data = isinstance(result, list) and len(result) > 0
-    return (True, has_data)
+        return ProbeResult(works=False, kind="error", probed_block=probed_block)
+
+    if isinstance(result, list) and len(result) > 0:
+        return ProbeResult(works=True, kind="data", probed_block=probed_block)
+
+    return ProbeResult(works=False, kind="unavailable", probed_block=probed_block)
+
+
+def binary_search_index_boundary(
+    earliest_block: int,
+    current_dec: int,
+    probe: Callable[[int], ProbeResult],
+    zones: ZoneSamples,
+) -> int:
+    """Binary search for earliest block where probe.works is True."""
+    low, high = earliest_block, current_dec
+    while low < high:
+        mid = (low + high) // 2
+        result = probe(mid)
+        zones.record(result)
+        if result.works:
+            high = mid
+        else:
+            low = mid + 1
+    return low
 
 
 def get_tx_from_block_or_nearby(
@@ -417,92 +518,73 @@ def main() -> None:
 
     # 4. Log index + block receipts
     print(f"{CYAN}[4/5]{NC} Checking log index and block receipts (binary search)...")
-    print("      Info: eth_getLogs (blockHash) and eth_getBlockReceipts; may issue many RPC calls.")
-    print("      Block-with-data / Block-with-[]-only: sampled blocks we probed (not chain-wide boundaries).")
+    print("      Info: Probes tx-bearing blocks; [] on a tx block = unavailable (pruned).")
+    print("      Tracks error vs empty [] vs data responses from sampled probes.")
     logs_earliest = "N/A"
     receipts_earliest = "N/A"
-    logs_first_with_data: Optional[int] = None
-    logs_last_empty: Optional[int] = None
-    receipts_first_with_data: Optional[int] = None
-    receipts_last_empty: Optional[int] = None
+    logs_zones = ZoneSamples()
+    receipts_zones = ZoneSamples()
     lr_iterations = 0
 
-    # If logs don't work at current block, method may be unsupported — skip binary search
-    works, has_data = logs_probe_at_block(current_dec)
+    head_logs = logs_probe_at_block(current_dec, current_dec)
     lr_iterations += 1
-    if not works:
-        print(f"      {YELLOW}eth_getLogs at latest block failed (unsupported or pruned) — skipping log index search{NC}")
+    logs_zones.record(head_logs)
+    if not head_logs.works:
+        kind_label = head_logs.kind if head_logs.kind != "skip" else "error/unavailable"
+        print(
+            f"      {YELLOW}eth_getLogs at latest block failed ({kind_label}) — skipping log index search{NC}"
+        )
     else:
-        if has_data:
-            logs_first_with_data = current_dec
-        else:
-            logs_last_empty = current_dec
-        low, high = earliest_block, current_dec
-        while low < high:
-            mid = (low + high) // 2
-            lr_iterations += 1
-            works, has_data = logs_probe_at_block(mid)
-            if works:
-                if has_data:
-                    logs_first_with_data = mid if logs_first_with_data is None else min(logs_first_with_data, mid)
-                else:
-                    logs_last_empty = mid if logs_last_empty is None else max(logs_last_empty, mid)
-                high = mid
-            else:
-                low = mid + 1
-        logs_earliest = low
+        logs_earliest = binary_search_index_boundary(
+            earliest_block,
+            current_dec,
+            lambda mid: logs_probe_at_block(mid, current_dec),
+            logs_zones,
+        )
         if logs_earliest == 1 or (earliest_block == 1 and logs_earliest <= 1000):
             logs_earliest = 1
         if logs_earliest == 1:
             print(f"      {GREEN}✓ Full log index from block 1 (eth_getLogs works for entire chain){NC}")
         else:
             print(f"      {YELLOW}Log index (eth_getLogs) available from block ~{logs_earliest}{NC}")
-        if logs_first_with_data is not None:
-            print(f"        Block with data: {logs_first_with_data}")
-        if logs_last_empty is not None:
-            print(f"        Block with [] only: {logs_last_empty}")
+        for line in logs_zones.format_details(current_dec):
+            print(f"        {line.strip()}")
 
-    works, has_data = receipts_probe_at_block(current_dec)
+    head_receipts = receipts_probe_at_block(current_dec, current_dec)
     lr_iterations += 1
-    if not works:
-        print(f"      {YELLOW}eth_getBlockReceipts at latest block failed (unsupported or pruned) — skipping receipts search{NC}")
+    receipts_zones.record(head_receipts)
+    if not head_receipts.works:
+        kind_label = head_receipts.kind if head_receipts.kind != "skip" else "error/unavailable"
+        print(
+            f"      {YELLOW}eth_getBlockReceipts at latest block failed ({kind_label}) — skipping receipts search{NC}"
+        )
     else:
-        if has_data:
-            receipts_first_with_data = current_dec
-        else:
-            receipts_last_empty = current_dec
-        low, high = earliest_block, current_dec
-        while low < high:
-            mid = (low + high) // 2
-            lr_iterations += 1
-            works, has_data = receipts_probe_at_block(mid)
-            if works:
-                if has_data:
-                    receipts_first_with_data = mid if receipts_first_with_data is None else min(receipts_first_with_data, mid)
-                else:
-                    receipts_last_empty = mid if receipts_last_empty is None else max(receipts_last_empty, mid)
-                high = mid
-            else:
-                low = mid + 1
-        receipts_earliest = low
+        receipts_earliest = binary_search_index_boundary(
+            earliest_block,
+            current_dec,
+            lambda mid: receipts_probe_at_block(mid, current_dec),
+            receipts_zones,
+        )
         if receipts_earliest == 1 or (earliest_block == 1 and receipts_earliest <= 1000):
             receipts_earliest = 1
         if receipts_earliest == 1:
-            print(f"      {GREEN}✓ Full block receipts from block 1 (eth_getBlockReceipts works for entire chain){NC}")
+            print(
+                f"      {GREEN}✓ Full block receipts from block 1 (eth_getBlockReceipts works for entire chain){NC}"
+            )
         else:
-            print(f"      {YELLOW}Block receipts (eth_getBlockReceipts) available from block ~{receipts_earliest}{NC}")
-        if receipts_first_with_data is not None:
-            print(f"        Block with data: {receipts_first_with_data}")
-        if receipts_last_empty is not None:
-            print(f"        Block with [] only: {receipts_last_empty}")
+            print(
+                f"      {YELLOW}Block receipts (eth_getBlockReceipts) available from block ~{receipts_earliest}{NC}"
+            )
+        for line in receipts_zones.format_details(current_dec):
+            print(f"        {line.strip()}")
 
-    print(f"      (used ~{lr_iterations} queries)")
+    print(f"      (used ~{lr_iterations}+ queries)")
     print()
 
     # 5. Summary
     print(f"{CYAN}[5/5]{NC} Summary")
     print(f"{CYAN}=== Summary ==={NC}")
-    print("(Log/receipt 'block with data' and 'block with [] only' = sampled blocks we probed, not boundaries)")
+    print("(Log/receipt zones = inferred from sampled probes during binary search, not exhaustive scans)")
     eb = earliest_block or 1
     block_count = current_dec - eb + 1
     print(f"Block range:          {eb} → {current_dec} ({block_count:,} blocks)")
@@ -541,10 +623,8 @@ def main() -> None:
             f"{YELLOW}Partial - from block ~{logs_earliest} ({logs_blocks:,} blocks, older logs not queryable){NC}"
         )
     if isinstance(logs_earliest, int):
-        if logs_first_with_data is not None:
-            print(f"  Block with logs: {logs_first_with_data}")
-        if logs_last_empty is not None:
-            print(f"  Block with [] only: {logs_last_empty}")
+        for line in logs_zones.format_details(current_dec):
+            print(line)
     print("Block receipts:        ", end="")
     if receipts_earliest == 1:
         print(f"{GREEN}✓ FULL (eth_getBlockReceipts works from block 1){NC}")
@@ -556,10 +636,8 @@ def main() -> None:
             f"{YELLOW}Partial - from block ~{receipts_earliest} ({receipts_blocks:,} blocks, older receipts not queryable){NC}"
         )
     if isinstance(receipts_earliest, int):
-        if receipts_first_with_data is not None:
-            print(f"  Block with receipts: {receipts_first_with_data}")
-        if receipts_last_empty is not None:
-            print(f"  Block with [] only: {receipts_last_empty}")
+        for line in receipts_zones.format_details(current_dec):
+            print(line)
     print()
     # Average RPC response time by method
     if _rpc_timings:
