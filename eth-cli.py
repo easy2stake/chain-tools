@@ -150,6 +150,62 @@ def rpc_call(method: str, params: list, return_error: bool = False) -> dict | No
         return None
 
 
+def rpc_call_list(method: str, params: list) -> tuple[str, list, object | None]:
+    """Fetch a JSON-RPC result expected to be a list.
+
+    Returns (status, items, info):
+      ok            - non-empty list
+      empty         - result is []
+      rpc_error     - JSON-RPC error object in info
+      null          - result is null
+      invalid       - result is not a list; raw value in info
+      request_error - HTTP/network failure; message in info
+    """
+    payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+    try:
+        r = requests.post(RPC_URL, json=payload, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if "error" in data:
+            return "rpc_error", [], data["error"]
+        result = data.get("result")
+        if result is None:
+            return "null", [], None
+        if not isinstance(result, list):
+            return "invalid", [], result
+        if not result:
+            return "empty", [], None
+        return "ok", result, None
+    except requests.RequestException as e:
+        return "request_error", [], str(e)
+
+
+def _report_list_rpc_failure(method: str, status: str, info: object | None) -> None:
+    """Print a specific failure message for list RPC calls and exit."""
+    if status == "rpc_error":
+        print(f"RPC error ({method}): {info}", file=sys.stderr)
+    elif status == "null":
+        print(f"{method} returned null (block not found or method unsupported).", file=sys.stderr)
+    elif status == "invalid":
+        print(f"{method} returned unexpected type (expected array): {info!r}", file=sys.stderr)
+    else:
+        print(f"RPC request failed ({method}): {info}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _print_block_context(block_label: str, block: dict | None, chain_id: int | None) -> None:
+    """Print shared block/chain header for block-scoped commands."""
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+    print(f"Block: {block_label}")
+    if block:
+        num_int = int(block.get("number", "0x0"), 16)
+        print(f"Number: {num_int:,} (0x{num_int:x})")
+        print(f"Hash:   {block.get('hash', 'N/A')}")
+    print(f"Chain:  {chain_name} ({chain_id})")
+    print(f"RPC:    {RPC_URL}")
+    print("-" * 80)
+
+
 def _decode_revert_reason(data_hex: str) -> str:
     """Decode Error(string) revert data. Returns empty string if not decodable."""
     if not data_hex or data_hex == "0x" or len(data_hex) < 138:  # 0x08c379a0 + 32 + 32 + min 1 char
@@ -280,18 +336,18 @@ def get_block_by_hash(block_hash: str, full_tx: bool = False) -> dict | None:
     return rpc_call("eth_getBlockByHash", [h, full_tx])
 
 
-def get_block_receipts(block_param: str) -> list | None:
+def get_block_receipts(block_param: str) -> tuple[str, list, object | None]:
     """Get all transaction receipts for a block via eth_getBlockReceipts."""
-    return rpc_call("eth_getBlockReceipts", [block_param])
+    return rpc_call_list("eth_getBlockReceipts", [block_param])
 
 
-def get_block_logs(block_param: str, is_hash: bool) -> list | None:
+def get_block_logs(block_param: str, is_hash: bool) -> tuple[str, list, object | None]:
     """Get event logs for a block via eth_getLogs."""
     if is_hash:
         filter_obj = {"blockHash": block_param}
     else:
         filter_obj = {"fromBlock": block_param, "toBlock": block_param}
-    return rpc_call("eth_getLogs", [filter_obj])
+    return rpc_call_list("eth_getLogs", [filter_obj])
 
 
 def _block_query_param(block_arg: str) -> tuple[str, str, bool]:
@@ -629,33 +685,29 @@ def check_block(block_arg: str, full: bool = False) -> None:
 def check_block_receipts(block_arg: str) -> None:
     """Query and print transaction receipts for a block (eth_getBlockReceipts)."""
     block_param, block_label, is_hash = _block_query_param(block_arg)
+    method = "eth_getBlockReceipts"
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         f_receipts = ex.submit(get_block_receipts, block_param)
         f_chain = ex.submit(get_chain_id)
-        receipts, chain_id = f_receipts.result(), f_chain.result()
+        status, receipts, info = f_receipts.result()
+        chain_id = f_chain.result()
 
-    if receipts is None:
-        print("eth_getBlockReceipts failed (unsupported or block not found).", file=sys.stderr)
-        sys.exit(1)
+    if status not in ("ok", "empty"):
+        _report_list_rpc_failure(method, status, info)
 
     if is_hash:
         block = get_block_by_hash(block_param)
     else:
         block = get_block(block_param)
 
-    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+    _print_block_context(block_label, block, chain_id)
 
-    print(f"Block: {block_label}")
-    if block:
-        num_int = int(block.get("number", "0x0"), 16)
-        print(f"Number: {num_int:,} (0x{num_int:x})")
-        print(f"Hash:   {block.get('hash', 'N/A')}")
-    print(f"Chain:  {chain_name} ({chain_id})")
-    print(f"RPC:    {RPC_URL}")
-    print("-" * 80)
+    if status == "empty":
+        print("Receipts: none (empty array)")
+        return
+
     print(f"Receipts: {len(receipts)}")
-
     for i, receipt in enumerate(receipts):
         status_ok = receipt.get("status") == "0x1"
         status_str = "Success" if status_ok else "Failed"
@@ -668,33 +720,29 @@ def check_block_receipts(block_arg: str) -> None:
 def check_block_logs(block_arg: str) -> None:
     """Query and print event logs for a block (eth_getLogs)."""
     block_param, block_label, is_hash = _block_query_param(block_arg)
+    method = "eth_getLogs"
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         f_logs = ex.submit(get_block_logs, block_param, is_hash)
         f_chain = ex.submit(get_chain_id)
-        logs, chain_id = f_logs.result(), f_chain.result()
+        status, logs, info = f_logs.result()
+        chain_id = f_chain.result()
 
-    if logs is None:
-        print("eth_getLogs failed (unsupported or block not found).", file=sys.stderr)
-        sys.exit(1)
+    if status not in ("ok", "empty"):
+        _report_list_rpc_failure(method, status, info)
 
     if is_hash:
         block = get_block_by_hash(block_param)
     else:
         block = get_block(block_param)
 
-    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+    _print_block_context(block_label, block, chain_id)
 
-    print(f"Block: {block_label}")
-    if block:
-        num_int = int(block.get("number", "0x0"), 16)
-        print(f"Number: {num_int:,} (0x{num_int:x})")
-        print(f"Hash:   {block.get('hash', 'N/A')}")
-    print(f"Chain:  {chain_name} ({chain_id})")
-    print(f"RPC:    {RPC_URL}")
-    print("-" * 80)
+    if status == "empty":
+        print("Logs: none (empty array)")
+        return
+
     print(f"Logs: {len(logs)}")
-
     for i, log in enumerate(logs):
         address = log.get("address", "N/A")
         topics = log.get("topics", [])
