@@ -298,6 +298,26 @@ def logs_probe_at_block(
     return ProbeResult(works=False, kind="unavailable", probed_block=probed_block)
 
 
+HEAD_LOG_SCAN = 5000  # max blocks to scan backward from tip for log calibration
+
+
+def find_log_emitting_block(
+    tip: int, min_block: int = 1, max_scan: int = HEAD_LOG_SCAN
+) -> Optional[tuple[int, int]]:
+    """Scan backward from tip for a tx block with non-empty eth_getLogs. Returns (block, log_count)."""
+    floor = max(min_block, tip - max_scan)
+    for block_num in range(tip, floor - 1, -1):
+        block = rpc("eth_getBlockByNumber", hex(block_num), False)
+        if not block or "hash" not in block:
+            continue
+        if not block.get("transactions"):
+            continue
+        logs_result, _err = _eth_get_logs_by_block_hash(block["hash"])
+        if isinstance(logs_result, list) and len(logs_result) > 0:
+            return (block_num, len(logs_result))
+    return None
+
+
 def receipts_probe_at_block(
     block_num: int, current_dec: int, radius: int = 20
 ) -> ProbeResult:
@@ -524,6 +544,8 @@ def main() -> None:
     receipts_earliest = "N/A"
     logs_zones = ZoneSamples()
     receipts_zones = ZoneSamples()
+    logs_data_confirmed_at: Optional[int] = None
+    logs_data_confirmed_count: Optional[int] = None
     lr_iterations = 0
 
     head_logs = logs_probe_at_block(current_dec, current_dec)
@@ -549,6 +571,21 @@ def main() -> None:
             print(f"      {YELLOW}Log index (eth_getLogs) available from block ~{logs_earliest}{NC}")
         for line in logs_zones.format_details(current_dec):
             print(f"        {line.strip()}")
+
+        print(f"      Calibrating: scanning backward from tip for log-emitting block (up to {HEAD_LOG_SCAN:,} blocks)...")
+        calibration = find_log_emitting_block(current_dec, min_block=max(earliest_block, 1))
+        if calibration is not None:
+            logs_data_confirmed_at, logs_data_confirmed_count = calibration
+            dist = current_dec - logs_data_confirmed_at
+            dist_note = f", {dist:,} block{'s' if dist != 1 else ''} from tip" if dist else ", at tip"
+            print(
+                f"      {GREEN}✓ Logs with data confirmed at block {logs_data_confirmed_at:,}"
+                f" ({logs_data_confirmed_count:,} events{dist_note}){NC}"
+            )
+        else:
+            print(
+                f"      {YELLOW}⚠ No log-emitting block found within {HEAD_LOG_SCAN:,} blocks of tip{NC}"
+            )
 
     head_receipts = receipts_probe_at_block(current_dec, current_dec)
     lr_iterations += 1
@@ -625,6 +662,15 @@ def main() -> None:
     if isinstance(logs_earliest, int):
         for line in logs_zones.format_details(current_dec):
             print(line)
+        if logs_data_confirmed_at is not None and logs_data_confirmed_count is not None:
+            print(
+                f"  Logs with data:      confirmed at block {logs_data_confirmed_at:,}"
+                f" ({logs_data_confirmed_count:,} events)"
+            )
+        elif head_logs.works:
+            print(
+                f"  Logs with data:      none found within {HEAD_LOG_SCAN:,} blocks of tip"
+            )
     print("Block receipts:        ", end="")
     if receipts_earliest == 1:
         print(f"{GREEN}✓ FULL (eth_getBlockReceipts works from block 1){NC}")
