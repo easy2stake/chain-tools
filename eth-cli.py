@@ -3,6 +3,7 @@
 
 import os
 import sys
+import json
 from datetime import datetime, timezone, timedelta
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -282,6 +283,15 @@ def get_block_by_hash(block_hash: str, full_tx: bool = False) -> dict | None:
 def get_block_receipts(block_param: str) -> list | None:
     """Get all transaction receipts for a block via eth_getBlockReceipts."""
     return rpc_call("eth_getBlockReceipts", [block_param])
+
+
+def get_block_logs(block_param: str, is_hash: bool) -> list | None:
+    """Get event logs for a block via eth_getLogs."""
+    if is_hash:
+        filter_obj = {"blockHash": block_param}
+    else:
+        filter_obj = {"fromBlock": block_param, "toBlock": block_param}
+    return rpc_call("eth_getLogs", [filter_obj])
 
 
 def _block_query_param(block_arg: str) -> tuple[str, str, bool]:
@@ -580,16 +590,20 @@ def check_mempool_tx(tx_hash: str) -> None:
         print("Status:      Pending (in mempool)")
 
 
-def check_block(block_arg: str) -> None:
+def check_block(block_arg: str, full: bool = False) -> None:
     """Query and print block details."""
     block_param, block_label, is_hash = _block_query_param(block_arg)
     if is_hash:
-        block = get_block_by_hash(block_param)
+        block = get_block_by_hash(block_param, full_tx=full)
     else:
-        block = get_block(block_param)
+        block = get_block(block_param, full_tx=full)
     if not block:
         print("Block not found.", file=sys.stderr)
         sys.exit(1)
+
+    if full:
+        print(json.dumps(block, indent=2))
+        return
 
     chain_id = get_chain_id()
     chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
@@ -651,19 +665,63 @@ def check_block_receipts(block_arg: str) -> None:
         print(f"[{i}] {tx_hash}  {status_str}  gas: {gas_used:,}  logs: {log_count}")
 
 
+def check_block_logs(block_arg: str) -> None:
+    """Query and print event logs for a block (eth_getLogs)."""
+    block_param, block_label, is_hash = _block_query_param(block_arg)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_logs = ex.submit(get_block_logs, block_param, is_hash)
+        f_chain = ex.submit(get_chain_id)
+        logs, chain_id = f_logs.result(), f_chain.result()
+
+    if logs is None:
+        print("eth_getLogs failed (unsupported or block not found).", file=sys.stderr)
+        sys.exit(1)
+
+    if is_hash:
+        block = get_block_by_hash(block_param)
+    else:
+        block = get_block(block_param)
+
+    chain_name = CHAIN_NAMES.get(chain_id, f"Chain {chain_id}") if chain_id else "Unknown"
+
+    print(f"Block: {block_label}")
+    if block:
+        num_int = int(block.get("number", "0x0"), 16)
+        print(f"Number: {num_int:,} (0x{num_int:x})")
+        print(f"Hash:   {block.get('hash', 'N/A')}")
+    print(f"Chain:  {chain_name} ({chain_id})")
+    print(f"RPC:    {RPC_URL}")
+    print("-" * 80)
+    print(f"Logs: {len(logs)}")
+
+    for i, log in enumerate(logs):
+        address = log.get("address", "N/A")
+        topics = log.get("topics", [])
+        topic0 = topics[0] if topics else "-"
+        tx_hash = log.get("transactionHash", "N/A")
+        log_index = log.get("logIndex", "N/A")
+        if isinstance(log_index, str) and log_index.startswith("0x"):
+            log_index = int(log_index, 16)
+        print(f"[{i}] {address}  topic0={topic0}  tx={tx_hash}  logIndex={log_index}")
+
+
 def print_help() -> None:
     print("Usage: eth-cli.py balance <address> [--chain NAME] [-u URL]")
     print("       eth-cli.py tx <tx_hash> [--chain NAME] [-u URL]")
     print("       eth-cli.py mempool <tx_hash> [--chain NAME] [-u URL]")
     print("       eth-cli.py block [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [-u URL]")
     print("       eth-cli.py receipts [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [-u URL]")
+    print("       eth-cli.py logs [latest|safe|finalized|NUMBER|BLOCK_HASH] [--chain NAME] [-u URL]")
     print("")
     print("  balance   - Check native + token balances for address")
     print("  tx        - Query transaction by hash")
     print("  mempool   - Check if transaction is pending in mempool")
     print("  block     - Query block (default: latest)")
     print("             Args: latest, safe, finalized, pending, earliest, block number (int/hex), or block hash")
+    print("             --full: dump full block JSON with transaction objects")
     print("  receipts  - List transaction receipts for a block (eth_getBlockReceipts; default: latest)")
+    print("  logs      - List event logs for a block (eth_getLogs; default: latest)")
     print("  --chain   - Chain: eth, bsc, zircuit, moonbeam (uses default RPC for that chain)")
     print("  -u, --url - RPC endpoint (port, host:port, or full http(s) URL; overrides --chain)")
     print("  --rpc     - Same as -u/--url")
@@ -684,11 +742,15 @@ def main():
     mode = None
     chain_arg = None
     rpc_arg = None
+    block_full = False
     i = 0
     while i < len(args):
         if args[i] == "--chain" and i + 1 < len(args):
             chain_arg = args[i + 1].lower()
             i += 2
+        elif args[i] == "--full":
+            block_full = True
+            i += 1
         elif args[i] in ("--rpc", "-u", "--url") and i + 1 < len(args):
             rpc_arg = args[i + 1]
             i += 2
@@ -727,6 +789,13 @@ def main():
                 i += 1
             else:
                 i += 2
+        elif args[i] == "logs":
+            mode = "logs"
+            target = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else "latest"
+            if target == "latest":
+                i += 1
+            else:
+                i += 2
         else:
             i += 1
 
@@ -747,9 +816,11 @@ def main():
                 sys.exit(1)
 
     if mode == "block":
-        check_block(target or "latest")
+        check_block(target or "latest", full=block_full)
     elif mode == "receipts":
         check_block_receipts(target or "latest")
+    elif mode == "logs":
+        check_block_logs(target or "latest")
     elif mode == "mempool":
         if not target:
             print("Error: Transaction hash required.", file=sys.stderr)
