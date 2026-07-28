@@ -125,6 +125,18 @@ fi
 # Log the start of the process
 log "Starting Geth checks on URL: $URL"
 
+# bc drives every timing and percentage; without it ReqTime shows 0 and progress shows "-".
+check_dependencies() {
+  local missing="" tool
+  for tool in curl jq bc; do
+    command -v "$tool" >/dev/null 2>&1 || missing="${missing}${missing:+ }${tool}"
+  done
+  [ -z "$missing" ] && return 0
+  log "Warning: missing tool(s): ${missing}"
+  log "  Install: apt-get install -y ${missing} | yum install -y ${missing} | brew install ${missing}"
+}
+check_dependencies
+
 # Per-run state dir (blocks/sec + sync ETA). Avoids /tmp permission clashes when
 # the same endpoint is checked by different users (e.g. root vs non-root).
 GETH_CHECKS_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/geth_checks.${UID}.XXXXXX") || {
@@ -169,7 +181,7 @@ extract_field() {
 # Function to safely convert hex to decimal
 safe_hex_to_dec() {
   hex_value=$1
-  if [[ $hex_value =~ ^0x ]]; then
+  if [[ $hex_value =~ ^0x[0-9a-fA-F]+$ ]]; then
     printf "%d" "$((16#${hex_value:2}))"
   else
     echo "0"
@@ -391,6 +403,7 @@ print_time_to_sync() {
 RETH_STAGE_ORDER=(
   Era Headers Header Bodies Body SenderRecovery Execution
   PruneSenderRecovery MerkleUnwind AccountHashing StorageHashing MerkleExecute
+  MerkleChangeSets
   TransactionLookup IndexStorageHistory IndexAccountHistory Prune Finish
 )
 
@@ -461,8 +474,9 @@ print_sync_status() {
     fi
     log "  starting: ${starting_dec}  current: ${current_dec}  highest: ${highest_dec}"
 
-    local ref_height=0 stage_max=0 max_key=-1 block_dec stage_name stage_block sort_key
+    local ref_height=0 stage_max=0 block_dec stage_name stage_block sort_key
     local active_name="" active_dec=""
+    local changesets_dec="" changesets_lag=0
     local tmp_stages
     tmp_stages=$(mktemp)
 
@@ -470,15 +484,10 @@ print_sync_status() {
       [ -z "$stage_name" ] && continue
       block_dec=$(safe_hex_to_dec "$stage_block")
       sort_key=$(reth_stage_sort_key "$stage_name")
-      if is_uint "$block_dec" && [ "$block_dec" -ge "$stage_max" ]; then
-        # Track the furthest-along stage; on ties keep the latest pipeline position.
-        if [ "$block_dec" -gt "$stage_max" ]; then
-          max_key=$sort_key
-        elif [ "$sort_key" -gt "$max_key" ]; then
-          max_key=$sort_key
-        fi
+      if is_uint "$block_dec" && [ "$block_dec" -gt "$stage_max" ]; then
         stage_max=$block_dec
       fi
+      [ "$stage_name" = "MerkleChangeSets" ] && changesets_dec=$block_dec
       printf "%04d\t%s\t%s\t%s\n" "$sort_key" "$stage_name" "$stage_block" "$block_dec" >> "$tmp_stages"
     done < <(echo "$sync_data" | jq -r '.result.stages[] | [.name, .block] | @tsv' 2>/dev/null)
 
@@ -487,16 +496,20 @@ print_sync_status() {
       ref_height=$highest_dec
     fi
 
-    # Active stage: Reth's pipeline runs stages in order, so the one currently
-    # running is the first stage (in pipeline order) still behind the
-    # furthest-along stage. Era (optional pre-merge import), MerkleUnwind
-    # (runs only on unwinds) and Finish are never reported as active.
+    if is_uint "$changesets_dec" && [ "$changesets_dec" -lt "$stage_max" ]; then
+      changesets_lag=1
+    fi
+
+    # Active stage: earliest stage in pipeline order with real progress that is
+    # still behind the furthest checkpoint. MerkleUnwind (unwinds only),
+    # MerkleChangeSets (deprecated; checkpoint stays frozen) and Finish are never
+    # active, and a stage at block 0 is unused rather than running.
     if [ "$stage_max" -gt 0 ]; then
       while IFS=$'\t' read -r sort_key stage_name stage_block block_dec; do
         [ -z "$stage_name" ] && continue
-        case "$stage_name" in Era|MerkleUnwind|Finish) continue ;; esac
+        case "$stage_name" in Era|MerkleUnwind|MerkleChangeSets|Finish) continue ;; esac
         is_uint "$block_dec" || continue
-        if [ $((10#$sort_key)) -gt "$max_key" ] && [ "$block_dec" -lt "$stage_max" ]; then
+        if [ "$block_dec" -gt 0 ] && [ "$block_dec" -lt "$stage_max" ]; then
           active_name="$stage_name"
           active_dec=$block_dec
           break
@@ -509,6 +522,9 @@ print_sync_status() {
 
     if [ -n "$active_name" ]; then
       log "  active stage: ${active_name} (block ${active_dec})"
+    fi
+    if [ "$changesets_lag" -eq 1 ]; then
+      log "  (MerkleChangeSets is deprecated in Reth; a stale checkpoint here is not sync lag)"
     fi
 
     log ""
