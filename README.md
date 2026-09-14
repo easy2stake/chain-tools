@@ -28,3 +28,16 @@ Query balances, transactions, mempool status, and blocks across common EVM chain
 ./eth-cli.py balance 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
 ./eth-cli.py -u 8545 tx 0xabc...
 ```
+
+## Promote freezer files to symlinks
+
+Replace local ancient/freezer files with symlinks to copies in another directory. Dry-run by default; pass `--apply` to act. Stop the node before `--apply --force`.
+
+```bash
+./promote-to-symlink.sh --src /data/archive/chain \
+  --dst /var/lib/node/ancient/chain --force 'bodies.000*.cdat'
+
+./promote-to-symlink.sh --src /data/archive/chain \
+  --dst /var/lib/node/ancient/chain --apply --force \
+  --backup-dir /data/ancient-displaced 'bodies.000*.cdat'
+```
