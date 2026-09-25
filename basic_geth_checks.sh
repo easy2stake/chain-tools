@@ -71,6 +71,7 @@ Commands:
   monitor                        Same as general_check but loops every second (Ctrl+C to stop).
   op                             Perform OP node checks (peers, sync status, L1/L2 heads where available).
   op_monitor                     Same as op but loops every second (Ctrl+C to stop).
+  op_peers                       List connected OP node peers (opp2p_peers): peer ID, direction, address, user agent, ENR.
   tendermint                     Perform Tendermint/CometBFT checks (peers, catching_up, latest/earliest blocks).
   tendermint_monitor             Same as tendermint but loops every second (Ctrl+C to stop).
   aptos                          Aptos REST ledger/info GET — pass full URL (including path, e.g. .../v1).
@@ -82,12 +83,12 @@ Commands:
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
   tx <tx_hash>                   Fetch details of a specific transaction by its hash.
   prysm_peers                  Extract consensus layer PRYSM peers.
-  op_peers                       List connected OP node peers (opp2p_peers): peer ID, direction, address, user agent, ENR.
 Examples:
   $0 8545 general_check
   $0 8545 monitor
   $0 9545 op
   $0 9545 op_monitor
+  $0 9545 op_peers
   $0 26657 tendermint
   $0 26657 tendermint_monitor
   $0 http://127.0.0.1:8080/v1 aptos
@@ -98,7 +99,6 @@ Examples:
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
   $0 127.0.0.1:8545 prysm_peers
-  $0 9545 op_peers
   $0 127.0.0.1:8545 <command> <command_params>
 EOF
   exit 1
