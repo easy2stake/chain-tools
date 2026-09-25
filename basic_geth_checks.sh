@@ -82,6 +82,7 @@ Commands:
   get_balance <account> [block_height] Fetch the balance of an account at a specific block height (default: latest).
   tx <tx_hash>                   Fetch details of a specific transaction by its hash.
   prysm_peers                  Extract consensus layer PRYSM peers.
+  op_peers                       List connected OP node peers (opp2p_peers): peer ID, direction, address, user agent, ENR.
 Examples:
   $0 8545 general_check
   $0 8545 monitor
@@ -97,6 +98,7 @@ Examples:
   $0 127.0.0.1:8545 get_block <block_number>
   $0 127.0.0.1:8545 tx <tx_hash>
   $0 127.0.0.1:8545 prysm_peers
+  $0 9545 op_peers
   $0 127.0.0.1:8545 <command> <command_params>
 EOF
   exit 1
@@ -1186,6 +1188,47 @@ get_prysm_peers() {
   fi
 }
 
+# List connected OP node peers via opp2p_peers (params [true] = connected only)
+get_op_peers() {
+  timed_rpc '{"jsonrpc":"2.0","method":"opp2p_peers","params":[true],"id":1}'
+  log "\nFetching OP node peers via opp2p_peers... (took ${RPC_ELAPSED}s)"
+  if [ -z "$RPC_RESULT" ]; then
+    echo "[ERROR] No response from $URL."
+    return 1
+  fi
+  local rpc_error
+  rpc_error=$(echo "$RPC_RESULT" | jq -r '.error.message // empty' 2>/dev/null)
+  if [ -n "$rpc_error" ]; then
+    echo "[ERROR] opp2p_peers failed: $rpc_error"
+    return 1
+  fi
+  if ! echo "$RPC_RESULT" | jq -e '.result | type == "object"' >/dev/null 2>&1; then
+    echo "[ERROR] Invalid opp2p_peers response: $RPC_RESULT"
+    return 1
+  fi
+
+  local total
+  total=$(echo "$RPC_RESULT" | jq -r '.result.totalConnected // ((.result.peers // {}) | length)')
+  echo "OP Peers connected: $total"
+  [ "$total" == "0" ] && return 0
+
+  printf "%-54s %-9s %-46s %s\n" "Peer ID" "Direction" "Address" "User Agent"
+  printf "%-54s %-9s %-46s %s\n" "------------------------------------------------------" "---------" "----------------------------------------------" "----------"
+  echo "$RPC_RESULT" | jq -r '
+    (.result.peers // {}) | to_entries[] | .value as $p |
+    [ ($p.peerID // .key),
+      (if ($p.direction | type) == "number" then (["unknown","inbound","outbound"][$p.direction] // ($p.direction | tostring)) else ($p.direction // "-" | tostring) end),
+      (($p.addresses // [])[0] // "-"),
+      (if ($p.userAgent // "") == "" then "-" else $p.userAgent end)
+    ] | @tsv' 2>/dev/null |
+    while IFS=$'\t' read -r peer_id direction address user_agent; do
+      printf "%-54s %-9s %-46s %s\n" "$peer_id" "$direction" "$address" "$user_agent"
+    done
+
+  echo -e "\nOP Peer ENRs:"
+  echo "$RPC_RESULT" | jq -r '(.result.peers // {})[] | .ENR // empty | select(. != "")'
+}
+
 # Monitor loop: run general_check every second (buffer output to reduce flicker)
 monitor_loop() {
   while true; do
@@ -1284,6 +1327,8 @@ elif [ "$2" == "get_balance" ]; then
   get_balance "$3" "$4"
 elif [ "$2" == "prysm_peers" ]; then
   get_prysm_peers
+elif [ "$2" == "op_peers" ]; then
+  get_op_peers
 else
   log "Error: Invalid command."
   usage
