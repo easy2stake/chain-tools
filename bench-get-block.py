@@ -160,6 +160,7 @@ class Stats:
     missing: int = 0
     txs: int = 0
     bytes: int = 0
+    last_done: float = 0.0  # perf_counter() when the last request finished
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -286,6 +287,7 @@ def main() -> None:
             block = rng.randint(lo, hi)
             kind, elapsed, size, ntx, detail = get_block(session, url, block, args.full, args.timeout)
             with stats.lock:
+                stats.last_done = time.perf_counter()
                 stats.bytes += size
                 if kind == "ok":
                     stats.ok += 1
@@ -311,7 +313,10 @@ def main() -> None:
 
     try:
         while any(t.is_alive() for t in threads):
-            time.sleep(0.5)
+            wait = 0.5
+            if deadline is not None and not stop.is_set():
+                wait = max(0.0, min(wait, deadline - time.perf_counter()))
+            time.sleep(wait)
             now = time.perf_counter()
             if deadline is not None and now >= deadline:
                 stop.set()
@@ -330,7 +335,8 @@ def main() -> None:
         print(f"\n{YELLOW}Interrupted — waiting for in-flight requests...{NC}", end="")
         for t in threads:
             t.join(timeout=args.timeout + 1)
-    wall = time.perf_counter() - t_start
+    # Measure to the last completed request, not to when the progress loop noticed
+    wall = (stats.last_done or time.perf_counter()) - t_start
     print("\n")
 
     # Summary
