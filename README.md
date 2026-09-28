@@ -29,6 +29,16 @@ Query balances, transactions, mempool status, and blocks across common EVM chain
 ./eth-cli.py -u 8545 tx 0xabc...
 ```
 
+## Block fetch benchmark
+
+Benchmark an RPC endpoint with `eth_getBlockByNumber` on random blocks. Reports req/s, latency percentiles, and errors.
+
+```bash
+./bench-get-block.py 8545
+./bench-get-block.py -n 5000 -c 32 --full http://localhost:8545
+./bench-get-block.py -d 60 --recent 100000 localhost:8545
+```
+
 ## Promote freezer files to symlinks
 
 Replace local ancient/freezer files with symlinks to copies in another directory. Dry-run by default; pass `--apply` to act. Stop the node before `--apply --force`.
