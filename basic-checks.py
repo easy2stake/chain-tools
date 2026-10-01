@@ -6,11 +6,13 @@
 #
 # All requests share one keep-alive HTTP session. Connection setup (TCP + TLS) is paid once in an
 # untimed warm-up request, so ReqTime shows request latency rather than handshake cost.
+# JSON-RPC checks also run over one WebSocket (ws:// / wss:// or --ws); `heads` streams newHeads.
 
 import argparse
 import io
 import json
 import re
+import ssl
 import sys
 import time
 from collections import deque
@@ -25,6 +27,9 @@ try:
 except ImportError:
     print("Error: requests required. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
+
+# websocket-client, imported only when a ws:// or wss:// endpoint is used (see load_websocket).
+websocket = None
 
 # Mainnet genesis time fallback when /eth/v1/beacon/genesis is unavailable.
 BEACON_GENESIS_TIME_MAINNET = 1606824023
@@ -56,14 +61,21 @@ HASH_COL = 66
 
 # --- URL handling ---
 
-def normalize_url(url: str) -> str:
-    """If only a port is given, default to 127.0.0.1:port; add http:// when omitted."""
+def normalize_url(url: str, ws: bool = False) -> str:
+    """If only a port is given, default to 127.0.0.1:port; add http:// (ws:// with --ws) when omitted.
+    With --ws, http:// and https:// URLs become ws:// and wss://."""
     url = url.strip()
     if url.isdigit():
         url = f"127.0.0.1:{url}"
-    if not url.startswith(("http://", "https://")):
-        url = "http://" + url
+    if ws and url.startswith(("http://", "https://")):
+        url = "ws" + url[4:]
+    if not url.startswith(("http://", "https://", "ws://", "wss://")):
+        url = ("ws://" if ws else "http://") + url
     return url
+
+
+def is_ws_url(url: str) -> bool:
+    return url.startswith(("ws://", "wss://"))
 
 
 def display_url(url: str) -> str:
@@ -106,8 +118,21 @@ def short_error(exc: requests.RequestException) -> str:
     return type(exc).__name__
 
 
+def rpc_reply(body: Any, elapsed: float, status: int, status_ok: bool) -> Reply:
+    """Turn a decoded JSON-RPC response into a Reply (shared by the HTTP and WebSocket clients)."""
+    if isinstance(body, dict) and "error" in body:
+        err = body["error"]
+        msg = err.get("message", err) if isinstance(err, dict) else err
+        return Reply(False, None, f"RPC error: {msg}"[:80], elapsed, status)
+    if not status_ok or not isinstance(body, dict):
+        return Reply(False, None, f"HTTP {status}" if not status_ok else "unexpected response", elapsed, status)
+    return Reply(True, body.get("result"), "", elapsed, status)
+
+
 class Client:
     """One keep-alive session per run; every request reuses the same connection when possible."""
+
+    kind = "http"
 
     def __init__(self, url: str, timeout: float):
         self.url = url
@@ -116,6 +141,7 @@ class Client:
         self.session.mount("http://", HTTPAdapter(pool_connections=1, pool_maxsize=1))
         self.session.mount("https://", HTTPAdapter(pool_connections=1, pool_maxsize=1))
         self.warmup: Optional[Reply] = None
+        self.notes: list = []  # connection events for the Errors section (WebSocket reconnects)
 
     def rpc(self, method: str, params: Optional[list] = None) -> Reply:
         payload = {"jsonrpc": "2.0", "method": method, "params": params or [], "id": 1}
@@ -129,13 +155,7 @@ class Client:
             body = r.json()
         except ValueError:
             return Reply(False, None, f"HTTP {r.status_code}, non-JSON response", elapsed, r.status_code)
-        if isinstance(body, dict) and "error" in body:
-            err = body["error"]
-            msg = err.get("message", err) if isinstance(err, dict) else err
-            return Reply(False, None, f"RPC error: {msg}"[:80], elapsed, r.status_code)
-        if r.status_code != 200 or not isinstance(body, dict):
-            return Reply(False, None, f"HTTP {r.status_code}", elapsed, r.status_code)
-        return Reply(True, body.get("result"), "", elapsed, r.status_code)
+        return rpc_reply(body, elapsed, r.status_code, r.status_code == 200)
 
     def get(self, path: str = "") -> Reply:
         url = self.url.rstrip("/") + path if path else self.url
@@ -156,6 +176,147 @@ class Client:
     def warm_up(self, target: str) -> None:
         """Open the connection with an untimed request. target is "rpc" or a GET path."""
         self.warmup = self.rpc("web3_clientVersion") if target == "rpc" else self.get(target)
+
+
+# --- WebSocket client ---
+
+WS_STATUS = 101  # "Switching Protocols": marks a reply that came back over an open socket
+
+
+def load_websocket() -> None:
+    global websocket
+    try:
+        import websocket as ws_module
+    except ImportError:
+        ws_module = None
+    if not hasattr(ws_module, "create_connection"):
+        print("Error: websocket-client required for ws:// and wss:// URLs. Install with:\n"
+              "  sudo apt install python3-websocket\n"
+              "  (or: pip install websocket-client)", file=sys.stderr)
+        sys.exit(1)
+    websocket = ws_module
+
+
+def ws_error(exc: Exception) -> str:
+    """Classify a WebSocket/socket exception without echoing its message (which may include the URL)."""
+    if isinstance(exc, (websocket.WebSocketTimeoutException, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, websocket.WebSocketBadStatusException):
+        return f"handshake HTTP {exc.status_code}"
+    if isinstance(exc, ssl.SSLError):
+        return "TLS error"
+    if isinstance(exc, websocket.WebSocketConnectionClosedException):
+        return "connection closed"
+    if isinstance(exc, (OSError, websocket.WebSocketAddressException)):
+        return "connection failed"
+    if isinstance(exc, websocket.WebSocketException):
+        return "websocket protocol error"
+    return type(exc).__name__
+
+
+class WsClient:
+    """One persistent WebSocket per run. JSON-RPC requests go as text frames, one at a time, so each
+    ReqTime is a clean round trip. A dropped socket is reopened on the next request."""
+
+    kind = "websocket"
+
+    def __init__(self, url: str, timeout: float):
+        self.url = url
+        self.timeout = timeout
+        self.ws = None
+        self.next_id = 0
+        self.connects = 0
+        self.warmup: Optional[Reply] = None
+        self.notes: list = []
+        self.pending: deque = deque()  # (arrival, notification) received while waiting for a reply
+
+    def _connect(self) -> None:
+        self.ws = websocket.create_connection(self.url, timeout=self.timeout)
+        self.connects += 1
+        if self.connects > 1:
+            self.notes.append("websocket: socket was closed; reconnected (that request includes the handshake)")
+
+    def _drop(self) -> None:
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        self.ws = None
+
+    def rpc(self, method: str, params: Optional[list] = None) -> Reply:
+        start = time.perf_counter()
+        try:
+            if self.ws is None:
+                self._connect()
+            self.next_id += 1
+            rid = self.next_id
+            self.ws.send(json.dumps({"jsonrpc": "2.0", "method": method, "params": params or [], "id": rid}))
+            while True:
+                raw = self.ws.recv()
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    return Reply(False, None, "non-JSON frame", time.perf_counter() - start, WS_STATUS)
+                if isinstance(body, dict) and body.get("id") == rid:
+                    break
+                if isinstance(body, dict) and body.get("method") == "eth_subscription":
+                    self.pending.append((time.time(), body))
+                if time.perf_counter() - start > self.timeout:
+                    raise websocket.WebSocketTimeoutException()
+        except (websocket.WebSocketException, OSError) as e:
+            # A timed-out or broken socket may hold a partial frame; start clean next time.
+            self._drop()
+            return Reply(False, None, ws_error(e), time.perf_counter() - start)
+        return rpc_reply(body, time.perf_counter() - start, WS_STATUS, True)
+
+    def notification(self, sub_id: str, wait: float) -> Optional[tuple]:
+        """Next eth_subscription result for sub_id as (arrival time, result), or None after `wait` s.
+        Raises on a broken socket (after dropping it)."""
+        for i, (arrival, body) in enumerate(self.pending):
+            if dig(body, "params", "subscription") == sub_id:
+                del self.pending[i]
+                return arrival, dig(body, "params", "result")
+        if self.ws is None:
+            raise websocket.WebSocketConnectionClosedException("not connected")
+        deadline = time.monotonic() + wait
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.ws.settimeout(remaining)
+                try:
+                    raw = self.ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    return None
+                arrival = time.time()
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    continue
+                if dig(body, "params", "subscription") == sub_id:
+                    return arrival, dig(body, "params", "result")
+        except (websocket.WebSocketException, OSError):
+            self._drop()
+            raise
+        finally:
+            if self.ws is not None:
+                self.ws.settimeout(self.timeout)
+
+    def get(self, path: str = "") -> Reply:
+        raise NotImplementedError("REST endpoints are not served over WebSocket")
+
+    def warm_up(self, target: str) -> None:
+        """Open the socket (TCP + TLS + HTTP upgrade) and send a first request, untimed."""
+        start = time.perf_counter()
+        try:
+            self._connect()
+        except (websocket.WebSocketException, OSError) as e:
+            self.warmup = Reply(False, None, ws_error(e), time.perf_counter() - start)
+            return
+        r = self.rpc("web3_clientVersion")
+        self.warmup = Reply(r.ok, r.data, r.error, time.perf_counter() - start, r.status)
 
 
 # --- Formatting helpers ---
@@ -243,14 +404,16 @@ def rfc3339_to_epoch(raw: Any) -> Optional[int]:
     return int(dt.timestamp())
 
 
-def table(widths: list, headers: list, rows: list) -> None:
+def fmt_row(widths: list, cols: list) -> str:
     """Left-aligned columns; a width of None leaves the column unpadded."""
-    def line(cols):
-        return " ".join(f"{show(c):<{w}}" if w else show(c) for c, w in zip(cols, widths)).rstrip()
-    print(line(headers))
-    print(line(["-" * (w or len(h)) for w, h in zip(widths, headers)]))
+    return " ".join(f"{show(c):<{w}}" if w else show(c) for c, w in zip(cols, widths)).rstrip()
+
+
+def table(widths: list, headers: list, rows: list) -> None:
+    print(fmt_row(widths, headers))
+    print(fmt_row(widths, ["-" * (w or len(h)) for w, h in zip(widths, headers)]))
     for row in rows:
-        print(line(row))
+        print(fmt_row(widths, row))
 
 
 # --- Rate / ETA tracking (kept in memory across monitor refreshes) ---
@@ -707,6 +870,101 @@ def beacon_peers(ctx: Ctx) -> int:
     return 0
 
 
+# --- newHeads stream (WebSocket only) ---
+
+HEADS_WIDTHS = [20, 12, HASH_COL, 8, 9, None]
+HEADS_HEADERS = ["Received(UTC)", "Block(dec)", "BlockHash", "Delay", "Interval", "Note"]
+
+
+def subscribe_heads(ctx: Ctx) -> Optional[str]:
+    r = ctx.check("eth_subscribe(newHeads)", ctx.client.rpc("eth_subscribe", ["newHeads"]))
+    if r.ok and not isinstance(r.data, str):
+        ctx.error("eth_subscribe(newHeads): no subscription id in result")
+        return None
+    return r.data if r.ok else None
+
+
+def heads(ctx: Ctx) -> int:
+    """Stream newHeads: per head, arrival delay vs. block timestamp, interval, gaps and reorgs.
+    Block timestamps are whole seconds, so Delay is only accurate to about a second."""
+    c = ctx.client
+    sub_id = subscribe_heads(ctx)
+    if sub_id is None:
+        return 1
+    stall = max(c.timeout, 30)
+    print(f"\nSubscribed to newHeads; Ctrl+C to stop\n")
+    print(fmt_row(HEADS_WIDTHS, HEADS_HEADERS))
+    print(fmt_row(HEADS_WIDTHS, ["-" * (w or len(h)) for w, h in zip(HEADS_WIDTHS, HEADS_HEADERS)]), flush=True)
+
+    delays: list = []
+    first = prev = None  # (arrival, number, hash)
+    gaps = missed = reorgs = stalls = 0
+    try:
+        while True:
+            try:
+                got = c.notification(sub_id, stall)
+            except (websocket.WebSocketException, OSError) as e:
+                ctx.error(f"newHeads stream: {ws_error(e)}; resubscribing")
+                print(f"(stream lost: {ws_error(e)}; resubscribing)", flush=True)
+                time.sleep(1)
+                sub_id = subscribe_heads(ctx) or sub_id
+                continue
+            if got is None:
+                stalls += 1
+                print(f"(no new head for {stall:g}s)", flush=True)
+                continue
+
+            arrival, head = got
+            number, ts = to_int(dig(head, "number")), to_int(dig(head, "timestamp"))
+            block_hash, parent = dig(head, "hash"), dig(head, "parentHash")
+            if number is None:
+                continue
+            delay = arrival - ts if ts else None
+            if delay is not None:
+                delays.append(delay)
+
+            note = ""
+            if prev is not None:
+                if number > prev[1] + 1:
+                    gaps += 1
+                    missed += number - prev[1] - 1
+                    note = f"gap +{number - prev[1] - 1}"
+                elif number <= prev[1]:
+                    reorgs += 1
+                    note = f"reorg ({prev[1] - number + 1} block(s) replaced)"
+                elif parent and prev[2] and parent != prev[2]:
+                    reorgs += 1
+                    note = "reorg (parentHash != previous hash)"
+            received = datetime.fromtimestamp(arrival, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            print(fmt_row(HEADS_WIDTHS, [
+                received, number, block_hash,
+                f"{delay:.1f}s" if delay is not None else "-",
+                f"{arrival - prev[0]:.2f}s" if prev else "-",
+                note,
+            ]), flush=True)
+            first = first or (arrival, number, block_hash)
+            prev = (arrival, number, block_hash)
+    except KeyboardInterrupt:
+        pass
+
+    if c.ws is not None:
+        c.rpc("eth_unsubscribe", [sub_id])
+
+    print("\n\nSummary:")
+    count = len(delays)
+    if first and prev and prev[0] > first[0]:
+        print(f"  Heads: {count} over {prev[0] - first[0]:.1f}s, "
+              f"{(prev[1] - first[1]) / (prev[0] - first[0]):.4f} blocks/sec")
+    else:
+        print(f"  Heads: {count}")
+    if delays:
+        ordered = sorted(delays)
+        print(f"  Delay (arrival - block timestamp): avg {sum(delays) / count:.1f}s  "
+              f"p50 {ordered[count // 2]:.1f}s  max {ordered[-1]:.1f}s")
+    print(f"  Gaps: {gaps} ({missed} block(s) not pushed)  Reorgs: {reorgs}  Stalls: {stalls}")
+    return 0
+
+
 # --- CLI ---
 
 # command -> (function, monitor, warm-up target: "rpc" or a GET path)
@@ -723,6 +981,7 @@ COMMANDS = {
     "beacon": (beacon_check, False, "/eth/v1/node/version"),
     "beacon_monitor": (beacon_check, True, "/eth/v1/node/version"),
     "prysm_peers": (beacon_peers, False, "/eth/v1/node/version"),
+    "heads": (heads, False, "rpc"),
 }
 
 # Per-block/tx lookups now live in eth-cli.py.
@@ -751,7 +1010,10 @@ def parse_args() -> argparse.Namespace:
   beacon, beacon_monitor
                        Beacon node: version, peers, health, sync, head slot, finality
   prysm_peers          ENRs of connected consensus layer peers (/eth/v1/node/peers)
+  heads                WebSocket only: stream newHeads with arrival delay, interval, gaps and reorgs
 
+WebSocket: pass ws:// or wss://, or --ws (port and host:port become ws://, http(s):// become ws(s)://).
+JSON-RPC checks (general_check, monitor, op*, heads) then run over one socket; REST checks need http(s).
 Block, transaction and balance lookups moved to eth-cli.py (block, tx, balance).
 
 Examples:
@@ -761,10 +1023,13 @@ Examples:
   %(prog)s 9545 op
   %(prog)s 26657 tendermint_monitor
   %(prog)s http://127.0.0.1:8080/v1 aptos
-  %(prog)s 3500 beacon""",
+  %(prog)s 3500 beacon
+  %(prog)s ws://127.0.0.1:8546 monitor
+  %(prog)s --ws 8546 heads
+  %(prog)s wss://rpc.example.com heads""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("url", help="Endpoint (port only, host:port, or full http(s) URL)")
+    parser.add_argument("url", help="Endpoint (port only, host:port, or full http(s)/ws(s) URL)")
     parser.add_argument("command", nargs="?", default="general_check", metavar="command",
                         help="Check to run (default: %(default)s); see the list below")
     parser.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
@@ -772,6 +1037,8 @@ Examples:
                         help="Per-request timeout (default: %(default)s)")
     parser.add_argument("-i", "--interval", type=float, default=1, metavar="SECS",
                         help="Refresh interval for *_monitor commands (default: %(default)s)")
+    parser.add_argument("--ws", action="store_true",
+                        help="Use WebSocket: port/host:port -> ws://, http(s):// -> ws(s)://")
     args = parser.parse_args()
 
     if args.command in MOVED_TO_ETH_CLI:
@@ -783,13 +1050,25 @@ Examples:
         parser.error(f"unexpected argument(s): {' '.join(args.extra)}")
     if args.timeout <= 0 or args.interval <= 0:
         parser.error("--timeout and --interval must be > 0")
+    args.url = normalize_url(args.url, args.ws)
+    if is_ws_url(args.url) and COMMANDS[args.command][2] != "rpc":
+        parser.error(f"'{args.command}' uses REST endpoints; pass an http(s) URL")
+    if args.command == "heads" and not is_ws_url(args.url):
+        parser.error("'heads' needs a WebSocket endpoint: ws://, wss:// or --ws")
     return args
 
 
-def print_header(client: Client, command: str, monitor: bool, interval: float) -> None:
+def print_header(client, command: str, monitor: bool, interval: float) -> None:
     print(f"Endpoint: {display_url(client.url)}  [{command}]")
     w = client.warmup
-    if w is not None:
+    if w is not None and client.kind == "websocket":
+        reconnects = f", reconnects: {client.connects - 1}" if client.connects > 1 else ""
+        if w.status is None:
+            print(f"Connection: websocket, warm-up failed (see Errors){reconnects}")
+        else:
+            print(f"Connection: websocket, warm-up {w.ms} ms (TCP/TLS + upgrade + first request); "
+                  f"ReqTime below reuses the socket{reconnects}")
+    elif w is not None:
         if w.status is None:
             print("Connection: warm-up failed (see Errors); requests below may include connection setup")
         else:
@@ -806,6 +1085,8 @@ def run_once(ctx: Ctx, func) -> int:
     if w is not None and w.status is None:
         ctx.error(f"warm-up: {w.error}")
     rc = func(ctx)
+    ctx.errors.extend(ctx.client.notes)
+    ctx.client.notes.clear()
     if ctx.errors:
         print("\nErrors:")
         for msg in ctx.errors:
@@ -816,7 +1097,11 @@ def run_once(ctx: Ctx, func) -> int:
 def main() -> None:
     args = parse_args()
     func, monitor, warm_target = COMMANDS[args.command]
-    client = Client(normalize_url(args.url), args.timeout)
+    if is_ws_url(args.url):
+        load_websocket()
+        client = WsClient(args.url, args.timeout)
+    else:
+        client = Client(args.url, args.timeout)
     ctx = Ctx(client, Window(), Window())
     client.warm_up(warm_target)
 
