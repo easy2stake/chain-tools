@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
-# Benchmark an EVM JSON-RPC endpoint with eth_getBlockByNumber calls on random blocks.
+# Benchmark an EVM JSON-RPC endpoint with eth_getBlockByNumber calls on random blocks,
+# or (--logs SPAN) with unfiltered eth_getLogs over random SPAN-block windows.
 # Reports throughput, latency percentiles, and error breakdown.
 
 import argparse
@@ -50,18 +51,22 @@ def parse_args() -> argparse.Namespace:
     script = sys.argv[0].split("/")[-1]
     parser = argparse.ArgumentParser(
         prog=script,
-        description="Benchmark an EVM JSON-RPC endpoint with eth_getBlockByNumber on random block numbers. "
+        description="Benchmark an EVM JSON-RPC endpoint with eth_getBlockByNumber on random block numbers, "
+        "or with unfiltered eth_getLogs over random block windows (--logs). "
         "Reports throughput, latency percentiles (p50/p90/p99), and errors.",
         epilog="""Block range:
   Default is 1 → latest. Use --recent N for the last N blocks (useful on pruned nodes),
   or --from/--to for an explicit range. Blocks returning null are counted as "missing".
+  With --logs SPAN, each request is eth_getLogs (no address/topics) over
+  [start, start+SPAN-1], with start random so the whole window stays inside the range.
 
 Examples:
   %(prog)s 8545
   %(prog)s -n 5000 -c 32 http://localhost:8545
   %(prog)s -d 60 -c 16 --full localhost:8545
   %(prog)s --recent 100000 -c 8 8545
-  %(prog)s --from 1000000 --to 2000000 --seed 42 8545""",
+  %(prog)s --from 1000000 --to 2000000 --seed 42 8545
+  %(prog)s --logs 100 --recent 100000 -c 8 8545""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -92,6 +97,12 @@ Examples:
         "--full",
         action="store_true",
         help="Request full transaction objects (second param true)",
+    )
+    parser.add_argument(
+        "--logs",
+        type=int,
+        metavar="SPAN",
+        help="Benchmark unfiltered eth_getLogs over random SPAN-block windows instead of eth_getBlockByNumber",
     )
     parser.add_argument(
         "--from",
@@ -149,6 +160,10 @@ Examples:
         parser.error("--duration must be > 0")
     if args.recent is not None and args.recent < 1:
         parser.error("--recent must be >= 1")
+    if args.logs is not None and args.logs < 1:
+        parser.error("--logs must be >= 1")
+    if args.logs is not None and args.full:
+        parser.error("--full only applies to eth_getBlockByNumber, not --logs")
     return args
 
 
@@ -158,7 +173,7 @@ class Stats:
     errors: Counter = field(default_factory=Counter)
     ok: int = 0
     missing: int = 0
-    txs: int = 0
+    items: int = 0  # txs (getBlock) or logs (getLogs) in successful responses
     bytes: int = 0
     last_done: float = 0.0  # perf_counter() when the last request finished
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -186,38 +201,58 @@ def get_latest_block(session: requests.Session, url: str, timeout: int) -> Optio
         return None
 
 
-def get_block(
-    session: requests.Session, url: str, block: int, full: bool, timeout: int
-) -> tuple[str, float, int, int, str]:
-    """Returns (kind, elapsed_sec, bytes, tx_count, detail). kind: ok | missing | error label."""
-    payload = {"jsonrpc": "2.0", "method": "eth_getBlockByNumber", "params": [hex(block), full], "id": 1}
+def rpc_call(
+    session: requests.Session, url: str, payload: dict, timeout: int
+) -> tuple[str, float, int, object, str]:
+    """Returns (kind, elapsed_sec, bytes, result, detail). kind: ok | missing | error label."""
     t0 = time.perf_counter()
     try:
         r = session.post(url, json=payload, timeout=timeout)
         elapsed = time.perf_counter() - t0
         size = len(r.content)
         if r.status_code != 200:
-            return (f"HTTP {r.status_code}", elapsed, size, 0, r.text[:200])
+            return (f"HTTP {r.status_code}", elapsed, size, None, r.text[:200])
         data = r.json()
     except requests.Timeout:
-        return ("timeout", time.perf_counter() - t0, 0, 0, "")
+        return ("timeout", time.perf_counter() - t0, 0, None, "")
     except requests.ConnectionError as e:
-        return ("connection error", time.perf_counter() - t0, 0, 0, str(e)[:200])
+        return ("connection error", time.perf_counter() - t0, 0, None, str(e)[:200])
     except ValueError as e:
-        return ("invalid JSON", time.perf_counter() - t0, 0, 0, str(e)[:200])
+        return ("invalid JSON", time.perf_counter() - t0, 0, None, str(e)[:200])
     except Exception as e:
-        return (type(e).__name__, time.perf_counter() - t0, 0, 0, str(e)[:200])
+        return (type(e).__name__, time.perf_counter() - t0, 0, None, str(e)[:200])
 
     err = data.get("error")
     if err is not None:
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         code = err.get("code") if isinstance(err, dict) else None
         label = f"RPC error {code}" if code is not None else "RPC error"
-        return (label, elapsed, size, 0, msg[:200])
+        return (label, elapsed, size, None, msg[:200])
     result = data.get("result")
     if result is None:
-        return ("missing", elapsed, size, 0, "")
-    return ("ok", elapsed, size, len(result.get("transactions") or []), "")
+        return ("missing", elapsed, size, None, "")
+    return ("ok", elapsed, size, result, "")
+
+
+def get_block(
+    session: requests.Session, url: str, block: int, full: bool, timeout: int
+) -> tuple[str, float, int, int, str]:
+    """Returns (kind, elapsed_sec, bytes, tx_count, detail)."""
+    payload = {"jsonrpc": "2.0", "method": "eth_getBlockByNumber", "params": [hex(block), full], "id": 1}
+    kind, elapsed, size, result, detail = rpc_call(session, url, payload, timeout)
+    ntx = len(result.get("transactions") or []) if isinstance(result, dict) else 0
+    return (kind, elapsed, size, ntx, detail)
+
+
+def get_logs(
+    session: requests.Session, url: str, start: int, span: int, timeout: int
+) -> tuple[str, float, int, int, str]:
+    """Unfiltered eth_getLogs over [start, start+span-1]. Returns (kind, elapsed_sec, bytes, log_count, detail)."""
+    params = [{"fromBlock": hex(start), "toBlock": hex(start + span - 1)}]
+    payload = {"jsonrpc": "2.0", "method": "eth_getLogs", "params": params, "id": 1}
+    kind, elapsed, size, result, detail = rpc_call(session, url, payload, timeout)
+    nlogs = len(result) if isinstance(result, list) else 0
+    return (kind, elapsed, size, nlogs, detail)
 
 
 def percentile(sorted_vals: list[float], p: float) -> float:
@@ -234,7 +269,8 @@ def main() -> None:
     url = normalize_rpc_url(args.rpc_url)
     session = make_session(args.concurrency)
 
-    print(f"{CYAN}=== eth_getBlockByNumber Benchmark ==={NC}")
+    method = "eth_getLogs" if args.logs is not None else "eth_getBlockByNumber"
+    print(f"{CYAN}=== {method} Benchmark ==={NC}")
     print(f"RPC: {display_url(url)}")
 
     latest = get_latest_block(session, url, args.timeout)
@@ -250,11 +286,19 @@ def main() -> None:
     if lo > hi:
         print(f"{RED}ERROR: Empty block range {lo} → {hi} (latest: {latest}){NC}")
         sys.exit(1)
+    span = args.logs or 1  # blocks per request
+    if hi - lo + 1 < span:
+        print(f"{RED}ERROR: --logs {span} is wider than the block range {lo:,} → {hi:,} ({hi - lo + 1:,} blocks){NC}")
+        sys.exit(1)
+    max_start = hi - span + 1
 
     mode = f"{args.duration:g}s" if args.duration is not None else f"{args.requests:,} requests"
     print(f"Latest block: {latest:,}")
     print(f"Block range:  {lo:,} → {hi:,} ({hi - lo + 1:,} blocks)")
-    print(f"Run:          {mode}, {args.concurrency} workers, full txs: {'yes' if args.full else 'no'}")
+    if args.logs is not None:
+        print(f"Run:          {mode}, {args.concurrency} workers, {span:,} blocks per eth_getLogs (unfiltered)")
+    else:
+        print(f"Run:          {mode}, {args.concurrency} workers, full txs: {'yes' if args.full else 'no'}")
     if args.seed is not None:
         print(f"Seed:         {args.seed}")
     print()
@@ -278,20 +322,25 @@ def main() -> None:
             issued += 1
             return True
 
+    def fetch(start: int) -> tuple[str, float, int, int, str]:
+        if args.logs is not None:
+            return get_logs(session, url, start, span, args.timeout)
+        return get_block(session, url, start, args.full, args.timeout)
+
     def worker(idx: int) -> None:
         rng = random.Random(worker_seeds[idx])
         for _ in range(args.warmup):
-            get_block(session, url, rng.randint(lo, hi), args.full, args.timeout)
+            fetch(rng.randint(lo, max_start))
         start_barrier.wait()
         while take_slot():
-            block = rng.randint(lo, hi)
-            kind, elapsed, size, ntx, detail = get_block(session, url, block, args.full, args.timeout)
+            block = rng.randint(lo, max_start)
+            kind, elapsed, size, nitems, detail = fetch(block)
             with stats.lock:
                 stats.last_done = time.perf_counter()
                 stats.bytes += size
                 if kind == "ok":
                     stats.ok += 1
-                    stats.txs += ntx
+                    stats.items += nitems
                     stats.latencies.append(elapsed)
                 elif kind == "missing":
                     stats.missing += 1
@@ -299,7 +348,8 @@ def main() -> None:
                 else:
                     stats.errors[kind] += 1
             if args.verbose and kind not in ("ok", "missing"):
-                print(f"\n  {RED}✗ block {block}: {kind}{NC} {detail}")
+                where = f"blocks {block}-{block + span - 1}" if args.logs is not None else f"block {block}"
+                print(f"\n  {RED}✗ {where}: {kind}{NC} {detail}")
 
     start_barrier = threading.Barrier(args.concurrency + 1)
     threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(args.concurrency)]
@@ -355,8 +405,10 @@ def main() -> None:
             print(f"  {kind}: {count:,}")
     else:
         print(f"Errors:       {GREEN}0{NC}")
-    if stats.ok:
-        print(f"Avg txs/blk:  {stats.txs / stats.ok:,.1f}")
+    if stats.ok and args.logs is not None:
+        print(f"Logs:         {stats.items:,} ({stats.items / stats.ok:,.1f}/req, {stats.items / stats.ok / span:,.1f}/blk avg)")
+    elif stats.ok:
+        print(f"Avg txs/blk:  {stats.items / stats.ok:,.1f}")
     if total:
         print(f"Data:         {stats.bytes / 1_048_576:,.2f} MiB ({stats.bytes / total / 1024:,.1f} KiB/req avg)")
     print()
