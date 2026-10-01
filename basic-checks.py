@@ -15,7 +15,7 @@ import sys
 import time
 from collections import deque
 from contextlib import redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -279,6 +279,16 @@ class Ctx:
     client: Client
     rate: Window
     eta: Window
+    errors: list = field(default_factory=list)  # printed in one section after the data
+
+    def error(self, msg: str) -> None:
+        self.errors.append(msg)
+
+    def check(self, what: str, r: Reply) -> Reply:
+        """Record a failed request under `what` (method or path); return the reply unchanged."""
+        if not r.ok:
+            self.error(f"{what}: {r.error}")
+        return r
 
 
 def print_blocks_per_sec(ctx: Ctx, height: int) -> None:
@@ -315,41 +325,46 @@ class BlockRow:
         return [self.label, utc(self.ts), age(self.ts), self.hex, show(self.number), self.hash, self.ms]
 
 
-def resolve_chain_identity(c: Client) -> tuple:
+def resolve_chain_identity(ctx: Ctx) -> tuple:
     """EVM: eth_chainId (hex, dec). Substrate nodes often lack it: fall back to system_chain name.
-    Returns (hex_or_name, int_or_name, elapsed, mode, error)."""
+    Returns (hex_or_name, int_or_name, elapsed, mode)."""
+    c = ctx.client
     r = c.rpc("eth_chainId")
     cid = to_int(r.data) if r.ok else None
     if cid is not None:
-        return r.data, str(cid), r.elapsed, "evm", ""
+        return r.data, str(cid), r.elapsed, "evm"
     s = c.rpc("system_chain")
     if s.ok and isinstance(s.data, str) and s.data:
-        return s.data, s.data, r.elapsed + s.elapsed, "substrate", ""
-    return None, None, r.elapsed, "evm", r.error or "null result"
+        return s.data, s.data, r.elapsed + s.elapsed, "substrate"
+    ctx.error(f"eth_chainId: {r.error or 'null result'}")
+    return None, None, r.elapsed, "evm"
 
 
-def evm_block_row(c: Client, label: str, tag: str) -> BlockRow:
+def evm_block_row(ctx: Ctx, label: str, tag: str) -> BlockRow:
     # Header-only (false): only number, hash and timestamp are needed.
-    r = c.rpc("eth_getBlockByNumber", [tag, False])
+    r = ctx.check(f"eth_getBlockByNumber({tag})", ctx.client.rpc("eth_getBlockByNumber", [tag, False]))
     block = r.data if r.ok and isinstance(r.data, dict) else None
     number = to_int(block.get("number")) if block else None
     if number is None:
-        reason = f"[ERROR] {r.error}" if not r.ok else "null (not available)"
-        return BlockRow(label, None, "-", None, reason, r.ms)
+        if r.ok:
+            ctx.error(f"eth_getBlockByNumber({tag}): null result (block not available)")
+        return BlockRow(label, None, "-", None, "-", r.ms)
     return BlockRow(label, to_int(block.get("timestamp")), block["number"], number,
                     block.get("hash") or "-", r.ms)
 
 
-def substrate_block_rows(c: Client) -> list:
+def substrate_block_rows(ctx: Ctx) -> list:
     """Substrate (e.g. Bittensor): best header + its hash; safe/finalized/earliest not shown."""
-    h = c.rpc("chain_getHeader")
+    c = ctx.client
+    h = ctx.check("chain_getHeader", c.rpc("chain_getHeader"))
     number_hex = dig(h.data, "number") if h.ok else None
     number = to_int(number_hex)
     if number is None:
-        reason = f"[ERROR] {h.error}" if not h.ok else "null (not available)"
-        latest = BlockRow("Latest", None, "-", None, reason, h.ms)
+        if h.ok:
+            ctx.error("chain_getHeader: no block number in result")
+        latest = BlockRow("Latest", None, "-", None, "-", h.ms)
     else:
-        bh = c.rpc("chain_getBlockHash", [number])
+        bh = ctx.check("chain_getBlockHash", c.rpc("chain_getBlockHash", [number]))
         block_hash = bh.data if bh.ok and isinstance(bh.data, str) and bh.data else "-"
         latest = BlockRow("Latest", None, number_hex, number, block_hash, ms(h.elapsed + bh.elapsed))
     return [latest] + [BlockRow(label, None, "-", None, "-", "-") for label in ("Safe", "Finalized", "Earliest")]
@@ -359,10 +374,11 @@ def stage_sort_key(name: str) -> int:
     return RETH_STAGE_ORDER.index(name) if name in RETH_STAGE_ORDER else 999
 
 
-def print_sync_status(r: Reply) -> None:
+def print_sync_status(ctx: Ctx, r: Reply) -> None:
     """eth_syncing: Reth stages table, or Geth/Erigon-style summary."""
     if not r.ok or r.data is None:
-        print(f"[ERROR] Failed to retrieve sync status ({r.error or 'null result'})")
+        print("Sync status: unknown")
+        ctx.error(f"eth_syncing: {r.error or 'null result'}")
         return
     req = f" (req {r.ms}ms)"
     res = r.data
@@ -371,7 +387,8 @@ def print_sync_status(r: Reply) -> None:
         print("  (eth_syncing=false; Reth may report this before sync fully completes)")
         return
     if not isinstance(res, dict):
-        print("[ERROR] Failed to retrieve sync status (unexpected result)")
+        print("Sync status: unknown")
+        ctx.error("eth_syncing: unexpected result")
         return
 
     starting = res.get("startingBlock", res.get("starting_block"))
@@ -429,25 +446,21 @@ def print_sync_status(r: Reply) -> None:
 
 def general_check(ctx: Ctx) -> int:
     c = ctx.client
-    chain_hex, chain_int, chain_elapsed, mode, chain_err = resolve_chain_identity(c)
-    peers = c.rpc("net_peerCount")
+    chain_hex, chain_int, chain_elapsed, mode = resolve_chain_identity(ctx)
+    peers = ctx.check("net_peerCount", c.rpc("net_peerCount"))
     peers_int = to_int(peers.data) if peers.ok else None
 
     print()
     table([16, 14, 8, 18], ["Chain ID (hex)", "Chain ID (int)", "Peers", "ReqTime(ms)"],
-          [[chain_hex or "[ERROR]", chain_int, peers_int, f"chain:{ms(chain_elapsed)} peers:{peers.ms}"]])
-    if chain_err:
-        print(f"  [ERROR] eth_chainId: {chain_err}")
-    if not peers.ok:
-        print(f"  [ERROR] net_peerCount: {peers.error}")
+          [[chain_hex, chain_int, peers_int, f"chain:{ms(chain_elapsed)} peers:{peers.ms}"]])
 
     print()
-    print_sync_status(c.rpc("eth_syncing"))
+    print_sync_status(ctx, c.rpc("eth_syncing"))
 
     if mode == "substrate":
-        rows = substrate_block_rows(c)
+        rows = substrate_block_rows(ctx)
     else:
-        rows = [evm_block_row(c, label, label.lower()) for label in ("Latest", "Safe", "Finalized", "Earliest")]
+        rows = [evm_block_row(ctx, label, label.lower()) for label in ("Latest", "Safe", "Finalized", "Earliest")]
 
     print()
     table([10, 20, 12, 12, 10, HASH_COL, 10],
@@ -467,8 +480,8 @@ def general_check(ctx: Ctx) -> int:
 def op_check(ctx: Ctx) -> int:
     """Rollup chain IDs, version, peers (opp2p_peerStats, fallback opp2p_peers), optimism_syncStatus."""
     c = ctx.client
-    rollup = c.rpc("optimism_rollupConfig")
-    version = c.rpc("optimism_version")
+    rollup = ctx.check("optimism_rollupConfig", c.rpc("optimism_rollupConfig"))
+    version = ctx.check("optimism_version", c.rpc("optimism_version"))
     peers = c.rpc("opp2p_peerStats")
     connected = dig(peers.data, "connected") if peers.ok else None
     peers_elapsed = peers.elapsed
@@ -477,6 +490,9 @@ def op_check(ctx: Ctx) -> int:
         fallback = c.rpc("opp2p_peers", [True])
         peers_elapsed += fallback.elapsed
         connected = dig(fallback.data, "totalConnected") if fallback.ok else None
+        if to_int(connected) is None:
+            ctx.error(f"opp2p_peerStats: {peers.error or 'no connected count'}; "
+                      f"opp2p_peers: {fallback.error or 'no totalConnected'}")
 
     print()
     table([12, 12, 22, 8, 34], ["L1 Chain ID", "L2 Chain ID", "Version", "Peers", "ReqTime(ms)"],
@@ -486,11 +502,8 @@ def op_check(ctx: Ctx) -> int:
 
     sync = c.rpc("optimism_syncStatus")
     print(f"\nop-node sync status (optimism_syncStatus req {sync.ms}ms)")
-    if not sync.ok:
-        print(f"[ERROR] Failed to retrieve optimism_syncStatus ({sync.error})")
-        return 1
-    if not isinstance(sync.data, dict):
-        print("[ERROR] Invalid optimism_syncStatus response")
+    if not sync.ok or not isinstance(sync.data, dict):
+        ctx.error(f"optimism_syncStatus: {sync.error or 'invalid response'}")
         return 1
 
     rows = []
@@ -513,11 +526,8 @@ def op_peers(ctx: Ctx) -> int:
     """Connected OP node peers via opp2p_peers (params [true] = connected only)."""
     r = ctx.client.rpc("opp2p_peers", [True])
     print(f"\nOP node peers via opp2p_peers (req {r.ms}ms)")
-    if not r.ok:
-        print(f"[ERROR] opp2p_peers failed: {r.error}")
-        return 1
-    if not isinstance(r.data, dict):
-        print("[ERROR] Invalid opp2p_peers response")
+    if not r.ok or not isinstance(r.data, dict):
+        ctx.error(f"opp2p_peers: {r.error or 'invalid response'}")
         return 1
 
     peers = r.data.get("peers") or {}
@@ -548,9 +558,9 @@ def tendermint_check(ctx: Ctx) -> int:
     c = ctx.client
     status = c.get("/status")
     if not status.ok or not isinstance(status.data, dict):
-        print(f"[ERROR] Failed to retrieve Tendermint /status ({status.error or 'non-JSON response'})")
+        ctx.error(f"/status: {status.error or 'non-JSON response'}")
         return 1
-    net = c.get("/net_info")
+    net = ctx.check("/net_info", c.get("/net_info"))
 
     res = status.data.get("result", status.data)
     net_res = net.data.get("result", net.data) if isinstance(net.data, dict) else None
@@ -587,7 +597,7 @@ def aptos_check(ctx: Ctx) -> int:
     ledger_timestamp is microseconds since the Unix epoch."""
     r = ctx.client.get()
     if not r.ok or not isinstance(r.data, dict):
-        print(f"[ERROR] Failed to retrieve Aptos ledger info ({r.error or 'non-JSON response'})")
+        ctx.error(f"ledger info: {r.error or 'non-JSON response'}")
         return 1
     d = r.data
 
@@ -636,19 +646,21 @@ def beacon_check(ctx: Ctx) -> int:
         genesis_time = BEACON_GENESIS_TIME_MAINNET
         genesis_note = " (fallback: Ethereum mainnet)"
 
-    version = c.get("/eth/v1/node/version")
+    version = ctx.check("/eth/v1/node/version", c.get("/eth/v1/node/version"))
     sync = c.get("/eth/v1/node/syncing")
     if not sync.ok or not isinstance(sync.data, dict):
-        print(f"[ERROR] Failed to retrieve beacon /eth/v1/node/syncing ({sync.error or 'non-JSON response'})")
+        ctx.error(f"/eth/v1/node/syncing: {sync.error or 'non-JSON response'}")
         return 1
-    peers = c.get("/eth/v1/node/peer_count")
-    health = c.get("/eth/v1/node/health")
+    peers = ctx.check("/eth/v1/node/peer_count", c.get("/eth/v1/node/peer_count"))
+    health = c.get("/eth/v1/node/health")  # non-2xx is a status here, shown in the Health column
     # Header only: /eth/v2/beacon/blocks/head would download the full block.
-    head = c.get("/eth/v1/beacon/headers/head")
-    finality = c.get("/eth/v1/beacon/states/head/finality_checkpoints")
+    head = ctx.check("/eth/v1/beacon/headers/head", c.get("/eth/v1/beacon/headers/head"))
+    finality = ctx.check("/eth/v1/beacon/states/head/finality_checkpoints",
+                         c.get("/eth/v1/beacon/states/head/finality_checkpoints"))
 
-    health_label = {200: "OK (synced)", 206: "Syncing"}.get(
-        health.status, f"HTTP {health.status}" if health.status else health.error)
+    health_label = {200: "OK (synced)", 206: "Syncing"}.get(health.status, f"HTTP {show(health.status)}")
+    if health.status is None:
+        ctx.error(f"/eth/v1/node/health: {health.error}")
     is_syncing = dig(sync.data, "data", "is_syncing")
     head_slot = dig(sync.data, "data", "head_slot")
     if head_slot in (None, ""):
@@ -688,7 +700,7 @@ def beacon_peers(ctx: Ctx) -> int:
     peers = dig(r.data, "data") if r.ok else None
     enrs = [p["enr"] for p in peers or [] if isinstance(p, dict) and p.get("enr")]
     if not enrs:
-        print(f"[ERROR] No peers found or error retrieving peers{f' ({r.error})' if r.error else ''}.")
+        ctx.error(f"/eth/v1/node/peers: {r.error or 'no peers found'}")
         return 1
     print(f"Peers: {len(enrs)}")
     print("\n".join(enrs))
@@ -779,12 +791,26 @@ def print_header(client: Client, command: str, monitor: bool, interval: float) -
     w = client.warmup
     if w is not None:
         if w.status is None:
-            print(f"Connection: warm-up failed ({w.error}); requests below may include connection setup")
+            print("Connection: warm-up failed (see Errors); requests below may include connection setup")
         else:
             print(f"Connection: warm-up {w.ms} ms (TCP/TLS setup + first request); ReqTime below reuses it")
     if monitor:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         print(f"Refreshed: {now}  (every {interval:g}s, Ctrl+C to stop)")
+
+
+def run_once(ctx: Ctx, func) -> int:
+    """Run one check, then print every error it collected in a single section at the end."""
+    ctx.errors = []
+    w = ctx.client.warmup
+    if w is not None and w.status is None:
+        ctx.error(f"warm-up: {w.error}")
+    rc = func(ctx)
+    if ctx.errors:
+        print("\nErrors:")
+        for msg in ctx.errors:
+            print(f"  {msg}")
+    return rc
 
 
 def main() -> None:
@@ -796,14 +822,14 @@ def main() -> None:
 
     if not monitor:
         print_header(client, args.command, False, args.interval)
-        sys.exit(func(ctx))
+        sys.exit(run_once(ctx, func))
 
     while True:
         start = time.monotonic()
         buf = io.StringIO()
         with redirect_stdout(buf):
             print_header(client, args.command, True, args.interval)
-            func(ctx)
+            run_once(ctx, func)
         # Clear and redraw in one write to reduce flicker.
         sys.stdout.write("\033[H\033[2J" + buf.getvalue())
         sys.stdout.flush()
