@@ -13,11 +13,16 @@ Probe how far back an RPC endpoint retains blocks, tx index, archival state, log
 
 ## Basic checks
 
-Run quick health checks on a local or remote node (sync status, peers, blocks, and more).
+Run quick health checks on a local or remote node: EVM (chain ID, peers, sync status, latest/safe/finalized/earliest blocks), OP node, Tendermint/CometBFT, Aptos and beacon. Each check has a `*_monitor` variant that refreshes every `--interval` seconds. All requests reuse one keep-alive connection, so `ReqTime` excludes TCP/TLS handshakes. Block, transaction and balance lookups are in `eth-cli`.
 
 ```bash
-./basic_geth_checks.sh 8545 general_check
-./basic_geth_checks.sh 127.0.0.1:8545 monitor
+./basic-checks.py 8545
+./basic-checks.py 127.0.0.1:8545 monitor
+./basic-checks.py https://rpc.example.com general_check
+./basic-checks.py 9545 op
+./basic-checks.py 26657 tendermint_monitor
+./basic-checks.py http://127.0.0.1:8080/v1 aptos
+./basic-checks.py 3500 beacon
 ```
 
 ## eth-cli
