@@ -33,7 +33,7 @@ Query balances, transactions, mempool status, and blocks across common EVM chain
 
 Benchmark an RPC endpoint with `eth_getBlockByNumber` on random blocks. Reports req/s, latency percentiles, and errors.
 
-With `--logs SPAN` it benchmarks unfiltered `eth_getLogs` (no address/topics) instead, over random `SPAN`-block windows inside the selected range, and also reports logs per request.
+With `--logs SPAN` it benchmarks `eth_getLogs` instead, over random `SPAN`-block windows inside the selected range, and also reports logs per request. Unfiltered by default; `--address` (repeatable, matched as OR) limits it to logs from those contracts.
 
 ```bash
 ./bench-get-block.py 8545
@@ -41,6 +41,7 @@ With `--logs SPAN` it benchmarks unfiltered `eth_getLogs` (no address/topics) in
 ./bench-get-block.py -d 60 --recent 100000 localhost:8545
 ./bench-get-block.py --logs 100 --recent 100000 -c 8 localhost:8545
 ./bench-get-block.py --logs 1000 --from 1000000 --to 2000000 -n 200 8545
+./bench-get-block.py --logs 1000 --address 0xdAC17F958D2ee523a2206206994597C13D831ec7 8545
 ```
 
 ## Promote freezer files to symlinks

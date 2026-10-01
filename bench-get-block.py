@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 #
 # Benchmark an EVM JSON-RPC endpoint with eth_getBlockByNumber calls on random blocks,
-# or (--logs SPAN) with unfiltered eth_getLogs over random SPAN-block windows.
+# or (--logs SPAN) with eth_getLogs over random SPAN-block windows, optionally filtered by --address.
 # Reports throughput, latency percentiles, and error breakdown.
 
 import argparse
 import random
+import re
 import sys
 import threading
 import time
@@ -26,6 +27,8 @@ GREEN = "\033[0;32m"
 YELLOW = "\033[1;33m"
 CYAN = "\033[0;36m"
 NC = "\033[0m"
+
+ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
 def normalize_rpc_url(url: str) -> str:
@@ -52,13 +55,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog=script,
         description="Benchmark an EVM JSON-RPC endpoint with eth_getBlockByNumber on random block numbers, "
-        "or with unfiltered eth_getLogs over random block windows (--logs). "
+        "or with eth_getLogs over random block windows (--logs, optionally filtered by --address). "
         "Reports throughput, latency percentiles (p50/p90/p99), and errors.",
         epilog="""Block range:
   Default is 1 → latest. Use --recent N for the last N blocks (useful on pruned nodes),
   or --from/--to for an explicit range. Blocks returning null are counted as "missing".
-  With --logs SPAN, each request is eth_getLogs (no address/topics) over
-  [start, start+SPAN-1], with start random so the whole window stays inside the range.
+  With --logs SPAN, each request is eth_getLogs over [start, start+SPAN-1], with
+  start random so the whole window stays inside the range. Unfiltered by default;
+  --address (repeatable, matched as OR) limits it to logs emitted by those contracts.
 
 Examples:
   %(prog)s 8545
@@ -66,7 +70,8 @@ Examples:
   %(prog)s -d 60 -c 16 --full localhost:8545
   %(prog)s --recent 100000 -c 8 8545
   %(prog)s --from 1000000 --to 2000000 --seed 42 8545
-  %(prog)s --logs 100 --recent 100000 -c 8 8545""",
+  %(prog)s --logs 100 --recent 100000 -c 8 8545
+  %(prog)s --logs 1000 --address 0xdAC17F958D2ee523a2206206994597C13D831ec7 8545""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -102,7 +107,13 @@ Examples:
         "--logs",
         type=int,
         metavar="SPAN",
-        help="Benchmark unfiltered eth_getLogs over random SPAN-block windows instead of eth_getBlockByNumber",
+        help="Benchmark eth_getLogs over random SPAN-block windows instead of eth_getBlockByNumber",
+    )
+    parser.add_argument(
+        "--address",
+        action="append",
+        metavar="ADDR",
+        help="With --logs: only logs from this contract address (repeatable, matched as OR)",
     )
     parser.add_argument(
         "--from",
@@ -164,6 +175,12 @@ Examples:
         parser.error("--logs must be >= 1")
     if args.logs is not None and args.full:
         parser.error("--full only applies to eth_getBlockByNumber, not --logs")
+    if args.address:
+        if args.logs is None:
+            parser.error("--address requires --logs")
+        for addr in args.address:
+            if not ADDRESS_RE.fullmatch(addr):
+                parser.error(f"--address {addr!r} is not a 0x-prefixed 20-byte hex address")
     return args
 
 
@@ -245,10 +262,14 @@ def get_block(
 
 
 def get_logs(
-    session: requests.Session, url: str, start: int, span: int, timeout: int
+    session: requests.Session, url: str, start: int, span: int, addresses: Optional[list[str]], timeout: int
 ) -> tuple[str, float, int, int, str]:
-    """Unfiltered eth_getLogs over [start, start+span-1]. Returns (kind, elapsed_sec, bytes, log_count, detail)."""
-    params = [{"fromBlock": hex(start), "toBlock": hex(start + span - 1)}]
+    """eth_getLogs over [start, start+span-1], optionally filtered by address.
+    Returns (kind, elapsed_sec, bytes, log_count, detail)."""
+    flt: dict = {"fromBlock": hex(start), "toBlock": hex(start + span - 1)}
+    if addresses:
+        flt["address"] = addresses[0] if len(addresses) == 1 else addresses
+    params = [flt]
     payload = {"jsonrpc": "2.0", "method": "eth_getLogs", "params": params, "id": 1}
     kind, elapsed, size, result, detail = rpc_call(session, url, payload, timeout)
     nlogs = len(result) if isinstance(result, list) else 0
@@ -296,7 +317,10 @@ def main() -> None:
     print(f"Latest block: {latest:,}")
     print(f"Block range:  {lo:,} → {hi:,} ({hi - lo + 1:,} blocks)")
     if args.logs is not None:
-        print(f"Run:          {mode}, {args.concurrency} workers, {span:,} blocks per eth_getLogs (unfiltered)")
+        print(f"Run:          {mode}, {args.concurrency} workers, {span:,} blocks per eth_getLogs "
+              f"({'filtered' if args.address else 'unfiltered'})")
+        for addr in args.address or []:
+            print(f"Address:      {addr}")
     else:
         print(f"Run:          {mode}, {args.concurrency} workers, full txs: {'yes' if args.full else 'no'}")
     if args.seed is not None:
@@ -324,7 +348,7 @@ def main() -> None:
 
     def fetch(start: int) -> tuple[str, float, int, int, str]:
         if args.logs is not None:
-            return get_logs(session, url, start, span, args.timeout)
+            return get_logs(session, url, start, span, args.address, args.timeout)
         return get_block(session, url, start, args.full, args.timeout)
 
     def worker(idx: int) -> None:
