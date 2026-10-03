@@ -438,11 +438,21 @@ class Window:
 
 
 @dataclass
+class PushState:
+    """newHeads subscription kept across monitor refreshes (WebSocket general_check/monitor)."""
+    sub_id: Optional[str] = None
+    connects: int = 0               # client.connects when subscribed; a reconnect drops the subscription
+    head: Optional[dict] = None     # newest pushed head
+    arrival: float = 0.0
+
+
+@dataclass
 class Ctx:
     client: Client
     rate: Window
     eta: Window
     errors: list = field(default_factory=list)  # printed in one section after the data
+    push: PushState = field(default_factory=PushState)
 
     def error(self, msg: str) -> None:
         self.errors.append(msg)
@@ -607,9 +617,45 @@ def print_sync_status(ctx: Ctx, r: Reply) -> None:
         print("  (snap-sync / state-healing fields present; see eth_syncing for full detail)")
 
 
+def ensure_push_subscription(ctx: Ctx) -> None:
+    """Subscribe to newHeads once, and again after a reconnect (subscriptions die with the socket)."""
+    st = ctx.push
+    if st.sub_id is None or st.connects != ctx.client.connects:
+        st.sub_id = subscribe_heads(ctx)
+        st.connects = ctx.client.connects
+
+
+def pushed_latest_row(ctx: Ctx, polled: BlockRow) -> BlockRow:
+    """Newest head pushed by the newHeads subscription. ReqTime shows the push delay
+    (arrival - block timestamp) instead, since nothing is requested for this row."""
+    st, label = ctx.push, "Latest (pushed)"
+    if st.sub_id:
+        try:
+            while True:
+                got = ctx.client.notification(st.sub_id, 0.005)
+                if got is None:
+                    break
+                st.arrival, st.head = got
+        except (websocket.WebSocketException, OSError) as e:
+            ctx.error(f"newHeads stream: {ws_error(e)}")
+            st.sub_id = None
+    number = to_int(dig(st.head, "number"))
+    if number is None:
+        return BlockRow(label, None, "-", None, "(no push yet)" if st.sub_id else "-", "-")
+    ts = to_int(dig(st.head, "timestamp"))
+    if polled.number is not None and polled.number - number >= 2:
+        ctx.error(f"newHeads: last pushed head {number} is {polled.number - number} blocks behind polled latest")
+    return BlockRow(label, ts, st.head.get("number"), number, st.head.get("hash") or "-",
+                    f"push:{st.arrival - ts:.1f}s" if ts else "-")
+
+
 def general_check(ctx: Ctx) -> int:
     c = ctx.client
     chain_hex, chain_int, chain_elapsed, mode = resolve_chain_identity(ctx)
+    pushed = c.kind == "websocket" and mode == "evm"
+    if pushed:
+        # Subscribe early so heads can arrive while the other requests run.
+        ensure_push_subscription(ctx)
     peers = ctx.check("net_peerCount", c.rpc("net_peerCount"))
     peers_int = to_int(peers.data) if peers.ok else None
 
@@ -624,11 +670,12 @@ def general_check(ctx: Ctx) -> int:
         rows = substrate_block_rows(ctx)
     else:
         rows = [evm_block_row(ctx, label, label.lower()) for label in ("Latest", "Safe", "Finalized", "Earliest")]
+    shown = rows[:1] + [pushed_latest_row(ctx, rows[0])] + rows[1:] if pushed else rows
 
     print()
-    table([10, 20, 12, 12, 10, HASH_COL, 10],
+    table([16 if pushed else 10, 20, 12, 12, 10, HASH_COL, 10],
           ["Row", "BlockTime", "Block Age", "Block(hex)", "Block(dec)", "BlockHash", "ReqTime(ms)"],
-          [row.cols() for row in rows])
+          [row.cols() for row in shown])
 
     latest = rows[0]
     if latest.number is not None:
