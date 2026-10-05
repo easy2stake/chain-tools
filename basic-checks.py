@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
-# Quick health checks for blockchain nodes: EVM execution clients (chain ID, peers, sync status,
-# latest/safe/finalized/earliest blocks), OP node, Tendermint/CometBFT, Aptos and beacon (consensus
+# Quick health checks for blockchain nodes: EVM execution clients (chain ID, enode, peers, sync
+# status, latest/safe/finalized/earliest blocks), OP node, Tendermint/CometBFT, Aptos and beacon (consensus
 # layer) REST APIs. One-shot, or *_monitor to refresh every --interval seconds.
 #
 # All requests share one keep-alive HTTP session. Connection setup (TCP + TLS) is paid once in an
@@ -498,6 +498,35 @@ class BlockRow:
         return [self.label, utc(self.ts), age(self.ts), self.hex, show(self.number), self.hash, self.ms]
 
 
+def enode_from(data: Any) -> Optional[str]:
+    """Pull an enode URL out of an admin_nodeInfo object or a bare string result."""
+    if isinstance(data, str) and data.startswith("enode://"):
+        return data
+    if isinstance(data, dict):
+        enode = data.get("enode")
+        if isinstance(enode, str) and enode.startswith("enode://"):
+            return enode
+    return None
+
+
+def fetch_enode(ctx: Ctx) -> tuple:
+    """Local devp2p enode. admin_nodeInfo is the usual method; net_localEnode and parity_enode
+    cover Nethermind and OpenEthereum when the admin namespace is off.
+    Returns (enode or None, seconds spent across the attempts)."""
+    elapsed = 0.0
+    primary_error = None
+    for method in ("admin_nodeInfo", "net_localEnode", "parity_enode"):
+        r = ctx.client.rpc(method)
+        elapsed += r.elapsed
+        enode = enode_from(r.data) if r.ok else None
+        if enode:
+            return enode, elapsed
+        if primary_error is None:
+            primary_error = f"{method}: {r.error or 'no enode in result'}"
+    ctx.error(f"enode: {primary_error}")
+    return None, elapsed
+
+
 def resolve_chain_identity(ctx: Ctx) -> tuple:
     """EVM: eth_chainId (hex, dec). Substrate nodes often lack it: fall back to system_chain name.
     Returns (hex_or_name, int_or_name, elapsed, mode)."""
@@ -662,6 +691,10 @@ def general_check(ctx: Ctx) -> int:
     print()
     table([16, 14, 8, 18], ["Chain ID (hex)", "Chain ID (int)", "Peers", "ReqTime(ms)"],
           [[chain_hex, chain_int, peers_int, f"chain:{ms(chain_elapsed)} peers:{peers.ms}"]])
+
+    if mode == "evm":
+        enode, enode_elapsed = fetch_enode(ctx)
+        print(f"\nEnode: {show(enode)} (req {ms(enode_elapsed)}ms)")
 
     print()
     print_sync_status(ctx, c.rpc("eth_syncing"))
