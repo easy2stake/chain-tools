@@ -54,6 +54,14 @@ With `--logs SPAN` it benchmarks `eth_getLogs` instead, over random `SPAN`-block
 ./bench-get-block.py --logs 1000 --address 0xdAC17F958D2ee523a2206206994597C13D831ec7 8545
 ```
 
+## Freezer size
+
+Estimate how much of a geth/BSC freezer (`ancient/chain`) the last N blocks occupy, per table, by reading the `.cidx`/`.ridx` index files: total, kept and prunable bytes. Read-only; nothing is modified.
+
+```bash
+./freezer-size.py /var/lib/node/geth/chaindata/ancient/chain <HEAD> 90000
+```
+
 ## Promote freezer files to symlinks
 
 Replace local ancient/freezer files with symlinks to copies in another directory. Dry-run by default; pass `--apply` to act. Stop the node before `--apply --force`.
