@@ -101,6 +101,7 @@ class Reply:
     error: str                     # short reason when not ok (never contains the URL)
     elapsed: float                 # seconds, request sent -> body read
     status: Optional[int] = None   # HTTP status code, when a response arrived
+    code: Optional[int] = None     # JSON-RPC error code, when the reply carried one
 
     @property
     def ms(self) -> str:
@@ -123,7 +124,8 @@ def rpc_reply(body: Any, elapsed: float, status: int, status_ok: bool) -> Reply:
     if isinstance(body, dict) and "error" in body:
         err = body["error"]
         msg = err.get("message", err) if isinstance(err, dict) else err
-        return Reply(False, None, f"RPC error: {msg}"[:80], elapsed, status)
+        code = to_int(err.get("code")) if isinstance(err, dict) else None
+        return Reply(False, None, f"RPC error: {msg}"[:80], elapsed, status, code)
     if not status_ok or not isinstance(body, dict):
         return Reply(False, None, f"HTTP {status}" if not status_ok else "unexpected response", elapsed, status)
     return Reply(True, body.get("result"), "", elapsed, status)
@@ -453,6 +455,7 @@ class Ctx:
     eta: Window
     errors: list = field(default_factory=list)  # printed in one section after the data
     push: PushState = field(default_factory=PushState)
+    probes: list = field(default_factory=list)  # extra (method, params) for namespace_check (--probe)
 
     def error(self, msg: str) -> None:
         self.errors.append(msg)
@@ -950,6 +953,100 @@ def beacon_peers(ctx: Ctx) -> int:
     return 0
 
 
+# --- JSON-RPC namespaces (namespace_check) ---
+
+ZERO_ADDRESS = "0x" + "0" * 40
+
+# One cheap, read-only method per namespace. Nothing here changes node state, so namespaces with only
+# state-changing methods (e.g. miner) are reported from rpc_modules instead of being probed.
+NAMESPACE_PROBES = [
+    ("web3_clientVersion", []),
+    ("net_version", []),
+    ("eth_chainId", []),
+    ("eth_getProof", [ZERO_ADDRESS, [], "latest"]),
+    ("eth_simulateV1", [{"blockStateCalls": []}, "latest"]),
+    ("txpool_status", []),
+    ("debug_getRawHeader", ["latest"]),
+    ("trace_block", ["0x1"]),
+    ("admin_nodeInfo", []),
+    ("personal_listAccounts", []),
+    ("engine_exchangeCapabilities", [[]]),
+    ("erigon_forks", []),
+    ("ots_getApiLevel", []),
+    ("parity_enode", []),
+    ("bor_getAuthor", ["latest"]),
+    ("parlia_getSnapshot", ["latest"]),
+    ("clique_getSigners", []),
+]
+
+# Namespaces that should not answer on an endpoint reachable by others.
+RISKY_NAMESPACES = {"admin", "personal", "miner", "engine", "debug"}
+
+# Gateway/proxy refusals that come back as a JSON-RPC error rather than an HTTP status.
+PROXY_BLOCK_RE = re.compile(r"not allowed|whitelist|allowlist|forbidden|unauthori[sz]ed|denied|blocked", re.I)
+
+
+def probe_status(r: Reply) -> str:
+    """OK, NOT AVAILABLE (-32601), BLOCKED (HTTP 401/403/405 or proxy message), EXISTS (other RPC
+    error: the method is there but rejected the params or failed), or FAILED (no usable response)."""
+    if r.ok:
+        return "OK"
+    msg = r.error.removeprefix("RPC error: ")
+    if r.status is None:
+        return f"FAILED ({r.error})"
+    if r.status in (401, 403, 405):
+        return f"BLOCKED (HTTP {r.status})"
+    if r.status not in (200, WS_STATUS):
+        return f"FAILED (HTTP {r.status})"
+    if r.code is None and not r.error.startswith("RPC error"):
+        return f"FAILED ({r.error})"
+    if PROXY_BLOCK_RE.search(msg):
+        return f"BLOCKED (proxy: {msg})"
+    if r.code == -32601:
+        return "NOT AVAILABLE"
+    return f"EXISTS (err {r.code}: {msg})"
+
+
+def namespace_check(ctx: Ctx) -> int:
+    """Which JSON-RPC namespaces answer: rpc_modules (what the node advertises), then one read-only
+    probe per namespace, since a proxy in front may still block what the node advertises."""
+    c = ctx.client
+    modules = c.rpc("rpc_modules")
+    advertised = modules.data if modules.ok and isinstance(modules.data, dict) else None
+    if advertised is None:
+        ctx.error(f"rpc_modules: {modules.error or 'unexpected result'}")
+    else:
+        listed = ", ".join(f"{name} {ver}" for name, ver in sorted(advertised.items()))
+        print(f"\nrpc_modules (req {modules.ms}ms): {listed or '(empty)'}")
+
+    rows, exposed, reached = [], set(), advertised is not None
+    for method, params in NAMESPACE_PROBES + ctx.probes:
+        ns = method.split("_", 1)[0]
+        r = c.rpc(method, params)
+        status = probe_status(r)
+        answered = status == "OK" or status.startswith("EXISTS")
+        reached = reached or not status.startswith("FAILED")
+        risky = ns in RISKY_NAMESPACES and (answered or (advertised is not None and ns in advertised))
+        if risky:
+            exposed.add(ns)
+        adv = "-" if advertised is None else ("yes" if ns in advertised else "no")
+        rows.append([ns, method, adv, r.ms, "⚠" if risky else "", status[:100]])
+
+    print()
+    table([10, 30, 10, 11, 4, None], ["Namespace", "Method", "Advertised", "ReqTime(ms)", "Risk", "Status"], rows)
+
+    probed = {m.split("_", 1)[0] for m, _ in NAMESPACE_PROBES + ctx.probes}
+    unprobed = sorted(set(advertised or {}) - probed)
+    exposed |= RISKY_NAMESPACES & set(unprobed)
+    if unprobed:
+        print(f"\nAdvertised but not probed: {', '.join(unprobed)}")
+    if exposed:
+        print(f"\n⚠ Exposed: {', '.join(sorted(exposed))}. Fine on a private/local port; "
+              "on a public endpoint this is usually a misconfiguration.")
+        return 1
+    return 0 if reached else 1
+
+
 # --- newHeads stream (WebSocket only) ---
 
 HEADS_WIDTHS = [20, 12, HASH_COL, 8, 9, None]
@@ -1062,6 +1159,7 @@ COMMANDS = {
     "beacon_monitor": (beacon_check, True, "/eth/v1/node/version"),
     "prysm_peers": (beacon_peers, False, "/eth/v1/node/version"),
     "heads": (heads, False, "rpc"),
+    "namespace_check": (namespace_check, False, "rpc"),
 }
 
 # Per-block/tx lookups now live in eth-cli.py.
@@ -1091,9 +1189,12 @@ def parse_args() -> argparse.Namespace:
                        Beacon node: version, peers, health, sync, head slot, finality
   prysm_peers          ENRs of connected consensus layer peers (/eth/v1/node/peers)
   heads                WebSocket only: stream newHeads with arrival delay, interval, gaps and reorgs
+  namespace_check      JSON-RPC namespaces: rpc_modules, then one read-only probe per namespace
+                       (OK / NOT AVAILABLE / BLOCKED / EXISTS); exits 1 if admin, personal, miner,
+                       engine or debug answers. Add probes with --probe METHOD[:PARAMS]
 
 WebSocket: pass ws:// or wss://, or --ws (port and host:port become ws://, http(s):// become ws(s)://).
-JSON-RPC checks (general_check, monitor, op*, heads) then run over one socket; REST checks need http(s).
+JSON-RPC checks (general_check, monitor, op*, heads, namespace_check) then run over one socket; REST checks need http(s).
 Block, transaction and balance lookups moved to eth-cli.py (block, tx, balance).
 
 Examples:
@@ -1106,7 +1207,9 @@ Examples:
   %(prog)s 3500 beacon
   %(prog)s ws://127.0.0.1:8546 monitor
   %(prog)s --ws 8546 heads
-  %(prog)s wss://rpc.example.com heads""",
+  %(prog)s wss://rpc.example.com heads
+  %(prog)s 8545 namespace_check
+  %(prog)s 8545 namespace_check --probe eth_getBlockReceipts:'["latest"]'""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("url", help="Endpoint (port only, host:port, or full http(s)/ws(s) URL)")
@@ -1119,6 +1222,8 @@ Examples:
                         help="Refresh interval for *_monitor commands (default: %(default)s)")
     parser.add_argument("--ws", action="store_true",
                         help="Use WebSocket: port/host:port -> ws://, http(s):// -> ws(s)://")
+    parser.add_argument("--probe", action="append", default=[], metavar="METHOD[:PARAMS]",
+                        help="namespace_check: extra method to probe; PARAMS is a JSON array (default [])")
     args = parser.parse_args()
 
     if args.command in MOVED_TO_ETH_CLI:
@@ -1135,6 +1240,18 @@ Examples:
         parser.error(f"'{args.command}' uses REST endpoints; pass an http(s) URL")
     if args.command == "heads" and not is_ws_url(args.url):
         parser.error("'heads' needs a WebSocket endpoint: ws://, wss:// or --ws")
+    if args.probe and args.command != "namespace_check":
+        parser.error("--probe only applies to namespace_check")
+    args.probes = []
+    for spec in args.probe:
+        method, _, raw = spec.partition(":")
+        try:
+            params = json.loads(raw) if raw else []
+        except ValueError:
+            params = None
+        if not re.fullmatch(r"[A-Za-z0-9]+_\w+", method) or not isinstance(params, list):
+            parser.error(f"--probe {spec!r}: expected METHOD or METHOD:<JSON array>, e.g. eth_call:'[...]'")
+        args.probes.append((method, params))
     return args
 
 
@@ -1182,7 +1299,7 @@ def main() -> None:
         client = WsClient(args.url, args.timeout)
     else:
         client = Client(args.url, args.timeout)
-    ctx = Ctx(client, Window(), Window())
+    ctx = Ctx(client, Window(), Window(), probes=args.probes)
     client.warm_up(warm_target)
 
     if not monitor:

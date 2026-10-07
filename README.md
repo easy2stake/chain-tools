@@ -30,6 +30,13 @@ JSON-RPC checks (`general_check`, `monitor`, `op*`) also run over one WebSocket:
 ./basic-checks.py wss://rpc.example.com heads
 ```
 
+`namespace_check` lists the namespaces the node advertises (`rpc_modules`), then sends one cheap, read-only probe per namespace (`eth`, `debug`, `trace`, `txpool`, `admin`, `engine`, `erigon`, `ots`, `parlia`, ...), since a proxy in front may still block what the node advertises. Each probe is `OK`, `NOT AVAILABLE` (-32601), `BLOCKED` (HTTP 401/403/405 or a proxy "not allowed" message), `EXISTS` (another RPC error: the method is there but rejected the params or failed) or `FAILED`. It exits 1 if `admin`, `personal`, `miner`, `engine` or `debug` answers. Add probes with `--probe METHOD[:PARAMS]` (PARAMS is a JSON array).
+
+```bash
+./basic-checks.py 8545 namespace_check
+./basic-checks.py https://rpc.example.com namespace_check --probe eth_getBlockReceipts:'["latest"]'
+```
+
 ## eth-cli
 
 Query balances, transactions, mempool status, and blocks across common EVM chains.
